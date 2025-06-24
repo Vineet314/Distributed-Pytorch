@@ -6,6 +6,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from time import time
 from torchvision import datasets, transforms
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -33,6 +34,7 @@ class Net(nn.Module):
     
 def train(model, train_loader, optimizer, epochs=1, log_interval=None):
     model.train()
+    a = time()
     for epoch in range(epochs):
         for batch_idx, (data, target) in enumerate(train_loader):
             data, target = data.to(device), target.to(device)
@@ -42,8 +44,8 @@ def train(model, train_loader, optimizer, epochs=1, log_interval=None):
             loss.backward()
             optimizer.step()
             if log_interval is not None and batch_idx % log_interval == 0:
-                print(f'Epoch {epoch+1}, Batch {batch_idx}, Loss: {loss.item():.4f}')
-
+                print(f'Epoch {epoch+1}, Batch {batch_idx}, Loss: {loss.item():.4f}, Time: {time()-a:.4f}s')
+                a = time()
 def eval(model, test_loader):
     model.eval()
     test_loss = 0
