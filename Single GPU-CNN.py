@@ -1,5 +1,7 @@
 '''Basic single GPU training script for MNIST CNN model.
 This script defines a simple CNN model having two convolutional layers, and two fully connected layers.
+This script is highlt inspired by PyTorch's official MNIST example:
+https://github.com/pytorch/examples/blob/main/mnist/main.py
 '''
 import sys
 import torch 
