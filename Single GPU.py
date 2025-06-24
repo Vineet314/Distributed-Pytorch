@@ -59,7 +59,7 @@ def eval(model, test_loader):
     test_loss /= len(test_loader.dataset)
     print(f'Test set: Average loss: {test_loss:.4f}, Accuracy: {correct}/{len(test_loader.dataset)} ({100. * correct / len(test_loader.dataset):.2f}%)')
 
-def main(device):
+def main(device, compile=False):
     # Define transformations for the training and test sets
     transform = transforms.Compose([transforms.ToTensor(),
         transforms.Normalize((0.1307,), (0.3081,))])
@@ -73,6 +73,8 @@ def main(device):
 
     # Initialize model, optimizer
     model = Net().to(device)
+    if compile: # can be used when running on Linux with PyTorch 2.0+
+        model = torch.compile(model)
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
 
     # Train the model
