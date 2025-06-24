@@ -1,7 +1,7 @@
 '''Basic single GPU training script for MNIST CNN model.
 This script defines a simple CNN model having two convolutional layers, and two fully connected layers.
 '''
-
+import sys
 import torch 
 import torch.nn as nn
 import torch.nn.functional as F
@@ -74,6 +74,7 @@ def main(device, compile=False):
     # Initialize model, optimizer
     model = Net().to(device)
     if compile: # can be used when running on Linux with PyTorch 2.0+
+        print("Compiling the model for performance optimization...")
         model = torch.compile(model)
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
 
@@ -86,4 +87,5 @@ def main(device, compile=False):
 if __name__ == '__main__':
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     print(f'Using device: {device}')
-    main(device)
+    compile = sys.argv[1]
+    main(device, compile.lower() == 'true')
