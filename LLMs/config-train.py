@@ -103,6 +103,7 @@ for iter in range(config.max_iters):
         logits, loss = model(x,y)
     optimizer.zero_grad(set_to_none=True)
     loss.backward()
+    norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
     optimizer.step()
     torch.cuda.synchronize()
     t1 = time()
