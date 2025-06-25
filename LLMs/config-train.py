@@ -7,6 +7,7 @@ In future commits, i will try to improve the code and make it more efficient.
 '''
 import tiktoken
 import torch
+import os
 
 from dataclasses import dataclass
 from time import time
@@ -51,7 +52,7 @@ class config:
     learning_rate = 3e-4
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     eval_iters = 200
-    compile = False
+    compile = False if os.name != 'posix' else True
 
     n_embd = 384
     n_head = 6
