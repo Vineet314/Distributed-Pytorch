@@ -41,61 +41,55 @@ n = int(0.9*len(data)) # first 90% will be train, rest val
 train_data = data[:n]
 val_data = data[n:]
 
-class Head(nn.Module):
-    """ one head of self-attention """
+class CausalSelfAttention(nn.Module):
+    """ Multi-Head Attention """
 
-    def __init__(self, head_size):
+    def __init__(self, n_head, n_embd, dropout=0):
         super().__init__()
-        self.key = nn.Linear(n_embd, head_size, bias=False)
-        self.query = nn.Linear(n_embd, head_size, bias=False)
-        self.value = nn.Linear(n_embd, head_size, bias=False)
-        self.register_buffer('tril', torch.tril(torch.ones(block_size, block_size)))
+        # k,q,v in a btach
+        self.c_attn = nn.Linear(n_embd, 3*n_embd)
+        # output projection
+        self.c_proj = nn.Linear(n_embd, n_embd)
+        # regularization
+        self.attn_dropout  = nn.Dropout(dropout)
+        self.resid_dropiut = nn.Dropout(dropout)
 
-        self.dropout = nn.Dropout(dropout)
+        self.n_head  = n_head
+        self.n_embd  = n_embd
+        self.dropout = dropout
 
     def forward(self, x):
         # input of size (batch, time-step, channels)
         # output of size (batch, time-step, head size)
-        B,T,C = x.shape
-        k = self.key(x)   # (B,T,hs)
-        q = self.query(x) # (B,T,hs)
-        # compute attention scores ("affinities")
-        wei = q @ k.transpose(-2,-1) * k.shape[-1]**-0.5 # (B, T, hs) @ (B, hs, T) -> (B, T, T)
-        wei = wei.masked_fill(self.tril[:T, :T] == 0, float('-inf')) # (B, T, T)
-        wei = F.softmax(wei, dim=-1) # (B, T, T)
-        wei = self.dropout(wei)
-        # perform the weighted aggregation of the values
-        v = self.value(x) # (B,T,hs)
-        out = wei @ v # (B, T, T) @ (B, T, hs) -> (B, T, hs)
-        return out
-    
-class MultiHeadAttention(nn.Module):
-    """ multiple heads of self-attention in parallel """
+        B,T,C = x.size()
+        q, k, v = self.c_attn(x).split(self.n_embd, dim=2)
+        k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
+        q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
+        v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
 
-    def __init__(self, num_heads, head_size):
+        y = F.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=self.dropout if self.training else 0, is_causal=True)
+        y = y.transpose(1,2).contiguous().view(B,T,C)
+
+        # output projection
+        y = self.resid_dropiut(self.c_proj(y))
+
+        return y
+       
+class MLP(nn.Module):
+    """ a simple linear layer followed by a non-linearity """
+
+    def __init__(self, n_embd, dropout=0):
         super().__init__()
-        self.heads = nn.ModuleList([Head(head_size) for _ in range(num_heads)])
-        self.proj = nn.Linear(head_size * num_heads, n_embd)
+        self.c_fc    = nn.Linear(n_embd, 4*n_embd)
+        self.gelu    = nn.GELU()
+        self.c_proj  = nn.Linear(4*n_embd, n_embd)
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x):
-        out = torch.cat([h(x) for h in self.heads], dim=-1)
-        out = self.dropout(self.proj(out))
-        return out
-    
-class FeedFoward(nn.Module):
-    """ a simple linear layer followed by a non-linearity """
-
-    def __init__(self, n_embd):
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(n_embd, 4 * n_embd),
-            nn.ReLU(),
-            nn.Linear(4 * n_embd, n_embd),
-            nn.Dropout(dropout))
-
-    def forward(self, x):
-        return self.net(x)
+        x = self.c_fc(x)
+        x = self.gelu(x)
+        x = self.c_proj(x)
+        return self.dropout(x)
     
 class Block(nn.Module):
     """ Transformer block: communication followed by computation """
@@ -103,29 +97,33 @@ class Block(nn.Module):
     def __init__(self, n_embd, n_head):
         # n_embd: embedding dimension, n_head: the number of heads we'd like
         super().__init__()
-        head_size = n_embd // n_head
-        self.sa = MultiHeadAttention(n_head, head_size)
-        self.ffwd = FeedFoward(n_embd)
-        self.ln1 = nn.LayerNorm(n_embd)
-        self.ln2 = nn.LayerNorm(n_embd)
+        self.attn = CausalSelfAttention(n_head, n_embd, dropout)
+        self.mlp  = MLP(n_embd, dropout)
+        self.ln1  = nn.LayerNorm(n_embd)
+        self.ln2  = nn.LayerNorm(n_embd)
 
     def forward(self, x):
-        x = x + self.sa(self.ln1(x))
-        x = x + self.ffwd(self.ln2(x))
+        x = x + self.attn(self.ln1(x))
+        x = x + self.mlp(self.ln2(x))
         return x
 
 class LLM(nn.Module):
     """ A simple GPT-like language model """
-    def __init__(self):
+    def __init__(self, vocab_size, block_size, n_embd, dropout, n_head, n_layer):
         super().__init__()
-        # each token directly reads off the logits for the next token from a lookup table
-        self.token_embedding_table = nn.Embedding(vocab_size, n_embd)
-        self.position_embedding_table = nn.Embedding(block_size, n_embd)
-        self.blocks = nn.Sequential(*[Block(n_embd, n_head=n_head) for _ in range(n_layer)])
-        self.ln_f = nn.LayerNorm(n_embd) # final layer norm
-        self.lm_head = nn.Linear(n_embd, vocab_size)
+        self.block_size = self.block_size
+        self.tkn_emb = nn.Embedding(vocab_size, n_embd)
+        self.pos_emb = nn.Embedding(block_size, n_embd)
 
-        # better init, not covered in the original GPT video, but important, will cover in followup video
+        self.transformer = nn.ModuleDict(dict(
+            drop = nn.Dropout(dropout),
+            h = nn.ModuleList([Block(n_embd, n_head) for _ in range(n_layer)]),
+            ln_f = nn.LayerNorm(n_embd)))
+
+        self.lm_head = nn.Linear(n_embd, vocab_size, bias=False)
+
+        self.tkn_emb.weight  = self.lm_head.weight
+
         self.apply(self._init_weights)
 
     def _init_weights(self, module):
@@ -136,25 +134,27 @@ class LLM(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    def forward(self, idx, targets=None):
-        B, T = idx.shape
+    def forward(self, idx, device, targets=None):
+        b,t = idx.size()
+        assert t<=self.block_size, f"Maximum context window is {self.block_size} but got length {t}"
+        tkn_emb = self.tkn_emb(idx)
+        pos_emb = self.pos_emb(torch.arange(0, t, dtype=torch.long, device=device))
+        
+        x = self.transformer.drop(tkn_emb+pos_emb)
 
-        # idx and targets are both (B,T) tensor of integers
-        tok_emb = self.token_embedding_table(idx) # (B,T,C)
-        pos_emb = self.position_embedding_table(torch.arange(T, device=device)) # (T,C)
-        x = tok_emb + pos_emb # (B,T,C)
-        x = self.blocks(x) # (B,T,C)
-        x = self.ln_f(x) # (B,T,C)
-        logits = self.lm_head(x) # (B,T,vocab_size)
+        for block in self.transformer.h:
+            x = block(x)
+        
+        x = self.transformer.ln_f(x)
 
-        if targets is None:
-            loss = None
+        if targets is not None:
+            # if we are given some desired targets also calculate the loss
+            logits = self.lm_head(x)
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
         else:
-            B, T, C = logits.shape
-            logits = logits.view(B*T, C)
-            targets = targets.view(B*T)
-            loss = F.cross_entropy(logits, targets)
-
+            # inference-time mini-optimization: only forward the lm_head on the very last position
+            logits = self.lm_head(x[:, [-1], :]) # note: using list [-1] to preserve the time dim
+            loss = None
         return logits, loss
 
     def generate(self, idx, max_new_tokens):
@@ -163,7 +163,7 @@ class LLM(nn.Module):
             # crop idx to the last block_size tokens
             idx_cond = idx[:, -block_size:]
             # get the predictions
-            logits, loss = self(idx_cond)
+            logits, _ = self(idx_cond)
             # focus only on the last time step
             logits = logits[:, -1, :] # becomes (B, C)
             # apply softmax to get probabilities
