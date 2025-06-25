@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from time import time
 from model import LLM
 
-torch.set_float32_matmul_precision("high")
+torch.set_float32_matmul_precision("high") # OPTIM 1 brought dt from 230 to 170
 
 class DataLoader:
     def __init__(self, B, T):
@@ -76,7 +76,7 @@ def estimate_loss():
     return out
 
 model = LLM(config).to(config.device)
-if config.compile:
+if config.compile: # see you on linux in next commit!
     print("Compiling the model with torch.compile()")
     model = torch.compile(model)
 
@@ -95,7 +95,7 @@ for iter in range(config.max_iters):
     x, y = train_loader.next_batch()
     x,y = x.to(device=config.device), y.to(device=config.device)
     # evaluate the loss
-    if torch.cuda.is_bf16_supported():
+    if torch.cuda.is_bf16_supported(): # OPTIM 2 brought dt from 170 to 130
         with torch.autocast(device_type=config.device, dtype=torch.bfloat16):
             logits, loss = model(x,y)
     else: # need to learn gradient scalers :(
