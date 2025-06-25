@@ -6,16 +6,23 @@ All the inefficiencies in the code basic-llm.py have been handled.
 With torch.compile(), this code is a highly efficient implementation of an LLM on a single GPU. 
 Although, algorithmic rewrites can be implemented like the grouped query attention, MHLA, etc.
 '''
-import tiktoken
-import torch
-import math
-import os
+import tiktoken, os, math
 
 from dataclasses import dataclass
 from time import time
-from model import LLM
+from .model import LLM
 
-torch.set_float32_matmul_precision("high") # OPTIM 1 brought dt from 230 to 170
+from torch.distributed import init_process_group, destroy_process_group
+from torch.nn.parallel import DistributedDataParallel as DDP
+import torch.distributed as dist
+import torch
+
+assert torch.cuda.is_available(), "Get a GPU. bring more than 1"
+assert (num_gpus:=torch.cuda.device_count()) > 1, "Please use single-gpu-llm.py" 
+
+torch.manual_seed(1729)
+torch.cuda.manual_seed(1729)
+torch.set_float32_matmul_precision("high")
 
 class DataLoader:
     def __init__(self, B, T):
@@ -47,7 +54,7 @@ class config:
     # hyperparameters
     batch_size = 4 # how many independent sequences will we process in parallel?
     block_size = 1024 # what is the maximum context length for predictions?
-    vocab_size = 50304 # OPTIM 4 (along with grad clipping) brought dt from 95 to 90
+    vocab_size = 50304
 
     max_iters = 500
     eval_interval = 50
@@ -60,34 +67,6 @@ class config:
     n_head = 6
     n_layer = 6
     dropout = 0.2
-
-train_loader = DataLoader(B=config.batch_size, T=config.block_size)
-eval_loader  = DataLoader(B=config.batch_size, T=config.block_size)
-
-total_batch_size = 2**16
-B = config.batch_size
-T = config.block_size
-assert total_batch_size % (B * T) == 0, "make sure total_batch_size is divisible by B * T"
-grad_accum_steps = total_batch_size // (B * T)
-
-max_lr = 3e-4
-min_lr = max_lr*0.1
-warmup_steps = 25
-max_decay_steps = 75
-
-def get_lr(iter):
-    # 1) linear warump for warmup_steps:
-    if iter < warmup_steps:
-        return max_lr * (iter+1)/warmup_steps
-    #2) if iter > lr_decay_iters, return min_lr
-    elif iter > max_decay_steps:
-        return min_lr
-    #3) in between, use cosine decay
-    else:
-        decay_ratio = (iter - warmup_steps) / (max_decay_steps - warmup_steps)
-        decay_ratio = min(decay_ratio, 1.0)  # ensure it does
-        coeff = 0.5 * (1 + math.cos(math.pi * decay_ratio))
-        return min_lr + coeff * (max_lr - min_lr)
 
 # generator funcion
 @torch.no_grad()
@@ -104,16 +83,42 @@ def estimate_loss():
     model.train()
     return out
 
+#___________MAKE YOUR MODEL_____________
 model = LLM(config).to(config.device)
-if config.compile: # OPTIM 3 brought dt from 130 to 95ms
+print(f"total parameters = {model.get_num_params():,}")
+if config.compile:
     print("Compiling the model with torch.compile()")
     model = torch.compile(model)
 
-# Training
-print(f"total parameters = {model.get_num_params():,}")
+# ____________LR SCHEDULER_________________
+max_lr = 3e-4
+min_lr = max_lr*0.1
+warmup_steps = 25
+max_decay_steps = 75
+def get_lr(iter):
+    # 1) linear warump for warmup_steps:
+    if iter < warmup_steps:
+        return max_lr * (iter+1)/warmup_steps
+    #2) if iter > lr_decay_iters, return min_lr
+    elif iter > max_decay_steps:
+        return min_lr
+    #3) in between, use cosine decay
+    else:
+        decay_ratio = (iter - warmup_steps) / (max_decay_steps - warmup_steps)
+        decay_ratio = min(decay_ratio, 1.0)  # ensure it does
+        coeff = 0.5 * (1 + math.cos(math.pi * decay_ratio))
+        return min_lr + coeff * (max_lr - min_lr)
 
-# OPTIM 6: dt 68ms to 60ms
+# ______________TRAINING____________________
 optimizer = model.configure_optimizers(weight_decay=0.1,learning_rate=config.learning_rate,device=config.device,prints=False)
+train_loader = DataLoader(B=config.batch_size, T=config.block_size)
+eval_loader  = DataLoader(B=config.batch_size, T=config.block_size)
+
+total_batch_size = 2**16
+B = config.batch_size
+T = config.block_size
+assert total_batch_size % (B * T) == 0, "make sure total_batch_size is divisible by B * T"
+grad_accum_steps = total_batch_size // (B * T)
 
 for iter in range(config.max_iters):
     t0 = time() 
@@ -130,7 +135,7 @@ for iter in range(config.max_iters):
         x, y = train_loader.next_batch()
         x,y = x.to(device=config.device), y.to(device=config.device)
         # evaluate the loss
-        if torch.cuda.is_bf16_supported(): # OPTIM 2 brought dt from 170 to 130
+        if torch.cuda.is_bf16_supported(): 
             with torch.autocast(device_type=config.device, dtype=torch.bfloat16):
                 logits, loss = model(x,y)
         else: # need to learn gradient scalers :(
@@ -140,7 +145,7 @@ for iter in range(config.max_iters):
         loss.backward()
 
     norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-    lr = get_lr(iter) # OPTIM 5 : i plugged in,now its almost 68ms
+    lr = get_lr(iter) 
     for param_grp in optimizer.param_groups:
         param_grp['lr'] = lr
     optimizer.step()

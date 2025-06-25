@@ -9,3 +9,4 @@ LLMs/data/
 LLMs/models/
 CNNs/data/
 LLMs/__pycache__
+CNNs/__pycache__
