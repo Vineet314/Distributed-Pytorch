@@ -74,7 +74,6 @@ class LLM(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.block_size = config.block_size
-        self.device = config.device
         self.tkn_emb = nn.Embedding(config.vocab_size, config.n_embd)
         self.pos_emb = nn.Embedding(config.block_size, config.n_embd)
 
@@ -139,7 +138,7 @@ class LLM(nn.Module):
         b,t = idx.size()
         assert t<=self.block_size, f"Maximum context window is {self.block_size} but got length {t}"
         tkn_emb = self.tkn_emb(idx)
-        pos_emb = self.pos_emb(torch.arange(0, t, dtype=torch.long, device=self.device))
+        pos_emb = self.pos_emb(torch.arange(0, t, dtype=torch.long, device=idx.device))
         
         x = self.transformer.drop(tkn_emb+pos_emb)
 

@@ -10,15 +10,15 @@ import tiktoken, os, math
 
 from dataclasses import dataclass
 from time import time
-from .model import LLM
+from model import LLM
 
 from torch.distributed import init_process_group, destroy_process_group
 from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.distributed as dist
 import torch
 
-assert torch.cuda.is_available(), "Get a GPU. bring more than 1"
-assert (num_gpus:=torch.cuda.device_count()) > 1, "Please use single-gpu-llm.py" 
+# assert torch.cuda.is_available(), "Get a GPU. bring more than 1"
+# assert (num_gpus:=torch.cuda.device_count()) > 1, "Please use single-gpu-llm.py" 
 
 torch.manual_seed(1729)
 torch.cuda.manual_seed(1729)
@@ -85,8 +85,8 @@ def estimate_loss():
 
 # _______________DDP setup_________________
 init_process_group(backend='nccl')
-ddp_rank = int(os.environ['LOCAL_RANK'])
-ddp_local_rank = int(os.environ['WORLD_SIZE'])
+ddp_rank = int(os.environ['RANK'])
+ddp_local_rank = int(os.environ['LOCAL_RANK'])
 ddp_world_size = int(os.environ['WORLD_SIZE'])
 device = f"cuda:{ddp_local_rank}"
 torch.cuda.set_device(device)
@@ -103,9 +103,7 @@ grad_accum_steps = total_batch_size // (B * T * ddp_world_size)
 #___________CREATE YOUR MODEL_____________
 model = LLM(config).to(device)
 print(f"total parameters = {model.get_num_params():,}")
-
-if config.compile:
-    model = torch.compile(model)
+model = torch.compile(model)
 
 model = DDP(model, device_ids=[ddp_local_rank])
 raw_model = model.module
