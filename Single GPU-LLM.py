@@ -5,13 +5,15 @@ https://github.com/karpathy/nanoGPT
 Currently there are a lot of inefficiencies in the code, but it is a good starting point to understand how to build a simple LLM.
 In future commits, i will try to improve the code and make it more efficient.
 '''
+import os
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
+from time import time
 
 # hyperparameters
-batch_size = 64 # how many independent sequences will we process in parallel?
-block_size = 256 # what is the maximum context length for predictions?
+batch_size = 4 # how many independent sequences will we process in parallel?
+block_size = 1024 # what is the maximum context length for predictions?
 max_iters = 500
 eval_interval = 50
 learning_rate = 3e-4
@@ -21,9 +23,9 @@ n_embd = 384
 n_head = 6
 n_layer = 6
 dropout = 0.2
-compile = False
+compile = True
 # training data
-with open('shakesphere.txt', 'r', encoding='utf-8') as f:
+with open('LLMs/shakesphere.txt', 'r', encoding='utf-8') as f: # on branch master
     text = f.read()
 
 # here are all the unique characters that occur in this text
@@ -183,6 +185,24 @@ def get_batch(split):
     x, y = x.to(device), y.to(device)
     return x, y
 
+max_lr = 3e-4
+min_lr = max_lr*0.1
+warmup_steps = 25
+max_decay_steps = 75
+def get_lr(iter):
+    # 1) linear warump for warmup_steps:
+    if iter < warmup_steps:
+        return max_lr * (iter+1)/warmup_steps
+    #2) if iter > lr_decay_iters, return min_lr
+    elif iter > max_decay_steps:
+        return min_lr
+    #3) in between, use cosine decay
+    else:
+        decay_ratio = (iter - warmup_steps) / (max_decay_steps - warmup_steps)
+        decay_ratio = min(decay_ratio, 1.0)  # ensure it does
+        coeff = 0.5 * (1 + (torch.cos(torch.tensor(torch.pi * decay_ratio))).item())
+        return min_lr + coeff * (max_lr - min_lr)
+
 @torch.no_grad()
 def estimate_loss():
     out = {}
@@ -198,18 +218,18 @@ def estimate_loss():
     return out
 
 model = LLM().to(device)
-if compile:
+if compile and os.name == 'posix':
     print("Compiling the model with torch.compile()")
     model = torch.compile(model)
 
 optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
 
 for iter in range(max_iters):
-
+    t0 = time()
     # every once in a while evaluate the loss on train and val sets
-    if iter % eval_interval == 0 or iter == max_iters - 1:
-        losses = estimate_loss()
-        print(f"step {iter}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
+    # if iter % eval_interval == 0 or iter == max_iters - 1:
+    #     losses = estimate_loss()
+    #     print(f"step {iter}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
 
     # sample a batch of data
     xb, yb = get_batch('train')
@@ -218,6 +238,13 @@ for iter in range(max_iters):
     logits, loss = model(xb, yb)
     optimizer.zero_grad(set_to_none=True)
     loss.backward()
+    # implementing LR scheduler
+    lr = get_lr(iter)
+    for param_grp in optimizer.param_groups:
+        param_grp['lr'] = lr
     optimizer.step()
+    t1 = time()
+    dt = 1000*(t1-t0)
+    print(f"step: {iter} | train loss:{loss.item():.4f} | dt: {dt:.2f}ms")
 
 torch.save(model, 'llm_model.pt')
