@@ -9,6 +9,7 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 from dataclasses import dataclass
+from contextlib import nullcontext
 
 # training data
 with open('shakesphere.txt', 'r', encoding='utf-8') as f:
@@ -104,8 +105,8 @@ class Block(nn.Module):
     def __init__(self, config):
         # n_embd: embedding dimension, n_head: the number of heads we'd like
         super().__init__()
-        self.attn = CausalSelfAttention(config.n_head, config.n_embd, config.dropout)
-        self.mlp  = MLP(config.n_embd, config.dropout)
+        self.attn = CausalSelfAttention(config)
+        self.mlp  = MLP(config)
         self.ln1  = nn.LayerNorm(config.n_embd)
         self.ln2  = nn.LayerNorm(config.n_embd)
 
@@ -119,12 +120,13 @@ class LLM(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.block_size = config.block_size
+        self.device = config.device
         self.tkn_emb = nn.Embedding(config.vocab_size, config.n_embd)
         self.pos_emb = nn.Embedding(config.block_size, config.n_embd)
 
         self.transformer = nn.ModuleDict(dict(
             drop = nn.Dropout(config.dropout),
-            h = nn.ModuleList([Block(config.n_embd, config.n_head) for _ in range(config.n_layer)]),
+            h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
             ln_f = nn.LayerNorm(config.n_embd)))
 
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
@@ -141,11 +143,11 @@ class LLM(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    def forward(self, idx, device, targets=None):
+    def forward(self, idx, targets=None):
         b,t = idx.size()
         assert t<=self.block_size, f"Maximum context window is {self.block_size} but got length {t}"
         tkn_emb = self.tkn_emb(idx)
-        pos_emb = self.pos_emb(torch.arange(0, t, dtype=torch.long, device=device))
+        pos_emb = self.pos_emb(torch.arange(0, t, dtype=torch.long, device=self.device))
         
         x = self.transformer.drop(tkn_emb+pos_emb)
 
@@ -204,11 +206,14 @@ def estimate_loss():
     model.train()
     return out
 
-model = LLM().to(config.device)
-if compile:
+model = LLM(config).to(config.device)
+if config.compile:
     print("Compiling the model with torch.compile()")
     model = torch.compile(model)
 
+# Training
+torch.backends.cuda.matmul.allow_tf32 = True # allow tf32 on matmul
+torch.backends.cudnn.allow_tf32 = True # allow tf32 on cudnn
 optimizer = torch.optim.AdamW(model.parameters(), lr=config.learning_rate)
 
 for iter in range(config.max_iters):
