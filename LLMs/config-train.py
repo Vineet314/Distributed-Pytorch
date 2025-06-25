@@ -5,38 +5,49 @@ https://github.com/karpathy/nanoGPT
 Currently there are a lot of innefficiencies in the code, but it is a good starting point to understand how to build a simple LLM.
 In future commits, i will try to improve the code and make it more efficient.
 '''
+import tiktoken
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
+
 from dataclasses import dataclass
 
 from model import LLM
 
-# training data
-with open('shakesphere.txt', 'r', encoding='utf-8') as f:
-    text = f.read()
+class DataLoader:
+    def __init__(self, B, T):
+        self.B = B
+        self.T = T
+        enc = tiktoken.get_encoding('gpt2')
+        # training data
+        with open('shakesphere.txt', 'r', encoding='utf-8') as f:
+            text = f.read()
+        tokens = enc.encode(text)
+        self.tokens = torch.tensor(tokens)
 
-# here are all the unique characters that occur in this text
-chars = sorted(list(set(text)))
-vocab = len(chars)
-# create a mapping from characters to integers
-stoi = { ch:i for i,ch in enumerate(chars) }
-itos = { i:ch for i,ch in enumerate(chars) }
-encode = lambda s: [stoi[c] for c in s] # encoder: take a string, output a list of integers
-decode = lambda l: ''.join([itos[i] for i in l]) # decoder: take a list of integers, output a string
+        self.current_position = 0
+    
+    def next_batch(self):
+        B, T = self.B, self.T
+        buf = self.tokens[self.current_position: self.current_position+(B*T+1)]
+        x = (buf[:-1]).view(B,T)
+        y = (buf[1:]).view(B,T)
+        # advance the position
+        self.current_position += B*T
 
-# Train and test splits
-data = torch.tensor(encode(text), dtype=torch.long)
-n = int(0.9*len(data)) # first 90% will be train, rest val
-train_data = data[:n]
-val_data = data[n:]
+        if self.current_position + (B*T+1)  > len(self.tokens):
+            self.current_position = 0
+        return x,y
+
+train_loader = DataLoader(B=4, T=32) # subject to change
+eval_loader  = DataLoader(B=4, T=32) # subject to change
 
 @dataclass
 class config:
     # hyperparameters
-    batch_size = 64 # how many independent sequences will we process in parallel?
-    block_size = 256 # what is the maximum context length for predictions?
-    vocab_size = vocab
+    batch_size = 16 # how many independent sequences will we process in parallel?
+    block_size = 1024 # what is the maximum context length for predictions?
+    vocab_size = 50257
 
     max_iters = 500
     eval_interval = 50
@@ -50,15 +61,6 @@ class config:
     n_layer = 6
     dropout = 0.2
 
-def get_batch(split):
-    # generate a small batch of data of inputs x and targets y
-    data = train_data if split == 'train' else val_data
-    ix = torch.randint(len(data) - config.block_size, (config.batch_size,))
-    x = torch.stack([data[i:i+config.block_size] for i in ix])
-    y = torch.stack([data[i+1:i+config.block_size+1] for i in ix])
-    x, y = x.to(config.device), y.to(config.device)
-    return x, y
-
 # generator funcion
 @torch.no_grad()
 def estimate_loss():
@@ -67,8 +69,8 @@ def estimate_loss():
     for split in ['train', 'val']:
         losses = torch.zeros(config.eval_iters)
         for k in range(config.eval_iters):
-            X, Y = get_batch(split)
-            logits, loss = model(X, Y)
+            X, Y = eval_loader.next_batch(split)
+            _, loss = model(X, Y)
             losses[k] = loss.item()
         out[split] = losses.mean()
     model.train()
@@ -80,8 +82,6 @@ if config.compile:
     model = torch.compile(model)
 
 # Training
-torch.backends.cuda.matmul.allow_tf32 = True # allow tf32 on matmul
-torch.backends.cudnn.allow_tf32 = True # allow tf32 on cudnn
 optimizer = torch.optim.AdamW(model.parameters(), lr=config.learning_rate)
 
 for iter in range(config.max_iters):
@@ -92,10 +92,10 @@ for iter in range(config.max_iters):
         print(f"step {iter}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
 
     # sample a batch of data
-    xb, yb = get_batch('train')
-
+    x, y = train_loader.next_batch()
+    x,y = x.to(device=config.device), y.to(device=config.device)
     # evaluate the loss
-    logits, loss = model(xb, yb)
+    logits, loss = model(x,y)
     optimizer.zero_grad(set_to_none=True)
     loss.backward()
     optimizer.step()
