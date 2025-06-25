@@ -7,6 +7,7 @@ In future commits, i will try to improve the code and make it more efficient.
 '''
 import tiktoken
 import torch
+import math
 import os
 
 from dataclasses import dataclass
@@ -61,6 +62,26 @@ class config:
 
 train_loader = DataLoader(B=config.batch_size, T=config.block_size)
 eval_loader  = DataLoader(B=config.batch_size, T=config.block_size)
+
+max_lr = 3e-4
+min_lr = max_lr*0.1
+warmup_steps = 25
+max_decay_steps = 75
+
+def get_lr(iter):
+    # 1) linear warump for warmup_steps:
+    if iter < warmup_steps:
+        return max_lr * (iter+1)/warmup_steps
+    #2) if iter > lr_decay_iters, return min_lr
+    elif iter > max_decay_steps:
+        return min_lr
+    #3) in between, use cosine decay
+    else:
+        decay_ratio = (iter - warmup_steps) / (max_decay_steps - warmup_steps)
+        decay_ratio = min(decay_ratio, 1.0)  # ensure it does
+        coeff = 0.5 * (1 + math.cos(math.pi * decay_ratio))
+        return min_lr + coeff * (max_lr - min_lr)
+
 # generator funcion
 @torch.no_grad()
 def estimate_loss():
@@ -104,6 +125,9 @@ for iter in range(config.max_iters):
     optimizer.zero_grad(set_to_none=True)
     loss.backward()
     norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+    lr = get_lr(iter) # OPTIM 5 : i plugged in,now its almost 68ms
+    for param_grp in optimizer.param_groups:
+        param_grp['lr'] = lr
     optimizer.step()
     torch.cuda.synchronize()
     t1 = time()
