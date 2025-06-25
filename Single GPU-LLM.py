@@ -2,7 +2,7 @@
 This code is highly inspired by Andrej Karpathy's work on his nanoGPT :
 https://github.com/karpathy/nanoGPT
 
-Currently there are a lot of innefficiencies in the code, but it is a good starting point to understand how to build a simple LLM.
+Currently there are a lot of inefficiencies in the code, but it is a good starting point to understand how to build a simple LLM.
 In future commits, i will try to improve the code and make it more efficient.
 '''
 import torch
