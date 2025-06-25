@@ -104,7 +104,8 @@ if config.compile: # OPTIM 3 brought dt from 130 to 95ms
 
 # Training
 print(f"total parameters = {model.get_num_params():,}")
-optimizer = torch.optim.AdamW(model.parameters(), lr=config.learning_rate)
+
+optimizer = model.configure_optimizers(weight_decay=0.1,learning_rate=config.learning_rate,device=config.device,prints=False)
 
 for iter in range(config.max_iters):
     t0 = time() 
