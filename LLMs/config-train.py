@@ -45,7 +45,7 @@ class config:
     # hyperparameters
     batch_size = 4 # how many independent sequences will we process in parallel?
     block_size = 1024 # what is the maximum context length for predictions?
-    vocab_size = 50304
+    vocab_size = 50304 # OPTIM 4 (along with grad clipping) brought dt from 95 to 90
 
     max_iters = 500
     eval_interval = 50
