@@ -25,9 +25,12 @@ torch.cuda.manual_seed(1729)
 torch.set_float32_matmul_precision("high")
 
 class DataLoader:
-    def __init__(self, B, T):
+    def __init__(self, B, T, process_rank, num_processes):
         self.B = B
         self.T = T
+        self.process_rank = process_rank
+        self.num_processes = num_processes
+
         enc = tiktoken.get_encoding('gpt2')
         # training data
         with open('data/shakesphere.txt', 'r', encoding='utf-8') as f:
@@ -35,7 +38,7 @@ class DataLoader:
         tokens = enc.encode(text)
         self.tokens = torch.tensor(tokens)
 
-        self.current_position = 0
+        self.current_position = self.B * self.T * self.process_rank
     
     def next_batch(self):
         B, T = self.B, self.T
@@ -43,10 +46,10 @@ class DataLoader:
         x = (buf[:-1]).view(B,T)
         y = (buf[1:]).view(B,T)
         # advance the position
-        self.current_position += B*T
+        self.current_position += B*T*self.num_processes
 
-        if self.current_position + (B*T+1)  > len(self.tokens):
-            self.current_position = 0
+        if self.current_position + (B*T*self.num_processes +1)  > len(self.tokens):
+            self.current_position = self.B * self.T * self.process_rank  # reset to the beginning for the next epoch
         return x,y
 
 @dataclass
@@ -58,10 +61,7 @@ class config:
 
     max_iters = 500
     eval_interval = 50
-    learning_rate = 3e-4
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
     eval_iters = 200
-    compile = False if os.name != 'posix' else True
 
     n_embd = 384
     n_head = 6
@@ -83,12 +83,32 @@ def estimate_loss():
     model.train()
     return out
 
-#___________MAKE YOUR MODEL_____________
-model = LLM(config).to(config.device)
+# _______________DDP setup_________________
+init_process_group(backend='nccl')
+ddp_rank = int(os.environ['LOCAL_RANK'])
+ddp_local_rank = int(os.environ['WORLD_SIZE'])
+ddp_world_size = int(os.environ['WORLD_SIZE'])
+device = f"cuda:{ddp_local_rank}"
+torch.cuda.set_device(device)
+master_process = ddp_rank == 0
+device_type = "cuda"
+
+#___________GRAD_ACCUM SETUP_____________
+total_batch_size = 2**16
+B = 4    # microbatch size
+T = 1024 # sequence length 
+assert total_batch_size % (B * T * ddp_world_size) == 0, "make sure total_batch_size is divisible by B * T * ddp_world_size"
+grad_accum_steps = total_batch_size // (B * T * ddp_world_size)
+
+#___________CREATE YOUR MODEL_____________
+model = LLM(config).to(device)
 print(f"total parameters = {model.get_num_params():,}")
+
 if config.compile:
-    print("Compiling the model with torch.compile()")
     model = torch.compile(model)
+
+model = DDP(model, device_ids=[ddp_local_rank])
+raw_model = model.module
 
 # ____________LR SCHEDULER_________________
 max_lr = 3e-4
@@ -110,15 +130,10 @@ def get_lr(iter):
         return min_lr + coeff * (max_lr - min_lr)
 
 # ______________TRAINING____________________
-optimizer = model.configure_optimizers(weight_decay=0.1,learning_rate=config.learning_rate,device=config.device,prints=False)
-train_loader = DataLoader(B=config.batch_size, T=config.block_size)
-eval_loader  = DataLoader(B=config.batch_size, T=config.block_size)
+optimizer = raw_model.configure_optimizers(weight_decay=0.1,learning_rate=3e-4,device=device,prints=False)
+train_loader = DataLoader(B=config.batch_size, T=config.block_size, process_rank=ddp_rank, num_processes=ddp_world_size)
+eval_loader  = DataLoader(B=config.batch_size, T=config.block_size, process_rank=ddp_rank, num_processes=ddp_world_size)
 
-total_batch_size = 2**16
-B = config.batch_size
-T = config.block_size
-assert total_batch_size % (B * T) == 0, "make sure total_batch_size is divisible by B * T"
-grad_accum_steps = total_batch_size // (B * T)
 
 for iter in range(config.max_iters):
     t0 = time() 
@@ -133,16 +148,21 @@ for iter in range(config.max_iters):
     loss_accum = 0.0 
     for micro_step in range(grad_accum_steps):
         x, y = train_loader.next_batch()
-        x,y = x.to(device=config.device), y.to(device=config.device)
+        x,y = x.to(device=device), y.to(device=device)
+        # sync gradients only on the last micro step
+        # this is to avoid unnecessary synchronization overhead as we are accumulating gradients
+        # this is a hack to avoid the DDP warning about gradient synchronization
+        model.require_backward_grad_sync = (micro_step == grad_accum_steps - 1)
         # evaluate the loss
         if torch.cuda.is_bf16_supported(): 
-            with torch.autocast(device_type=config.device, dtype=torch.bfloat16):
+            with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
                 logits, loss = model(x,y)
         else: # need to learn gradient scalers :(
             logits, loss = model(x,y)
         loss = loss/grad_accum_steps
         loss_accum += loss.detach()  
         loss.backward()
+        dist.all_reduce(loss_accum, op=dist.ReduceOp.SUM)
 
     norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
     lr = get_lr(iter) 
@@ -152,6 +172,7 @@ for iter in range(config.max_iters):
     torch.cuda.synchronize()
     t1 = time()
     dt = (t1-t0)*1000
-    print(f"step: {iter} | train loss:{loss_accum.item():.4f} | dt: {dt:.2f}ms")
+    if master_process : print(f"step: {iter} | train loss:{loss_accum.item():.4f} | dt: {dt:.2f}ms")
 
+destroy_process_group()
 torch.save(model, 'models/llm_model.pt')
