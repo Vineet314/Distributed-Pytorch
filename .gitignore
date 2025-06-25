@@ -2,7 +2,10 @@
 *.pt
 *.pth
 *.ckpt
-shakesphere.txt
 *.pyc
 *.pyo
 *.pyd
+LLMs/data/
+LLMs/models/
+CNNs/data/
+LLMs/__pycache__

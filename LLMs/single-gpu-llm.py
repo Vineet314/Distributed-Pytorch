@@ -2,8 +2,9 @@
 This code is highly inspired by Andrej Karpathy's work on his nanoGPT :
 https://github.com/karpathy/nanoGPT
 
-Currently there are a lot of innefficiencies in the code, but it is a good starting point to understand how to build a simple LLM.
-In future commits, i will try to improve the code and make it more efficient.
+All the inefficiencies in the code basic-llm.py have been handled.
+With torch.compile(), this code is a highly efficient implementation of an LLM on a single GPU. 
+Although, algorithmic rewrites can be implemented like the grouped query attention, MHLA, etc.
 '''
 import tiktoken
 import torch
@@ -22,7 +23,7 @@ class DataLoader:
         self.T = T
         enc = tiktoken.get_encoding('gpt2')
         # training data
-        with open('shakesphere.txt', 'r', encoding='utf-8') as f:
+        with open('data/shakesphere.txt', 'r', encoding='utf-8') as f:
             text = f.read()
         tokens = enc.encode(text)
         self.tokens = torch.tensor(tokens)
@@ -148,4 +149,4 @@ for iter in range(config.max_iters):
     dt = (t1-t0)*1000
     print(f"step: {iter} | train loss:{loss_accum.item():.4f} | dt: {dt:.2f}ms")
 
-torch.save(model, 'llm_model.pt')
+torch.save(model, 'models/llm_model.pt')
