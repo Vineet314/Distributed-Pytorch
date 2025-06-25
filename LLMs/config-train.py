@@ -7,12 +7,12 @@ In future commits, i will try to improve the code and make it more efficient.
 '''
 import tiktoken
 import torch
-import torch.nn as nn
-from torch.nn import functional as F
 
 from dataclasses import dataclass
-
+from time import time
 from model import LLM
+
+torch.set_float32_matmul_precision("high")
 
 class DataLoader:
     def __init__(self, B, T):
@@ -39,13 +39,10 @@ class DataLoader:
             self.current_position = 0
         return x,y
 
-train_loader = DataLoader(B=4, T=32) # subject to change
-eval_loader  = DataLoader(B=4, T=32) # subject to change
-
 @dataclass
 class config:
     # hyperparameters
-    batch_size = 16 # how many independent sequences will we process in parallel?
+    batch_size = 4 # how many independent sequences will we process in parallel?
     block_size = 1024 # what is the maximum context length for predictions?
     vocab_size = 50257
 
@@ -61,6 +58,8 @@ class config:
     n_layer = 6
     dropout = 0.2
 
+train_loader = DataLoader(B=config.batch_size, T=config.block_size)
+eval_loader  = DataLoader(B=config.batch_size, T=config.block_size)
 # generator funcion
 @torch.no_grad()
 def estimate_loss():
@@ -69,7 +68,7 @@ def estimate_loss():
     for split in ['train', 'val']:
         losses = torch.zeros(config.eval_iters)
         for k in range(config.eval_iters):
-            X, Y = eval_loader.next_batch(split)
+            X, Y = eval_loader.next_batch()
             _, loss = model(X, Y)
             losses[k] = loss.item()
         out[split] = losses.mean()
@@ -82,22 +81,31 @@ if config.compile:
     model = torch.compile(model)
 
 # Training
+print(f"total parameters = {model.get_num_params():,}")
 optimizer = torch.optim.AdamW(model.parameters(), lr=config.learning_rate)
 
 for iter in range(config.max_iters):
-
+    t0 = time() 
     # every once in a while evaluate the loss on train and val sets
-    if iter % config.eval_interval == 0 or iter == config.max_iters - 1:
-        losses = estimate_loss()
-        print(f"step {iter}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
+    # if iter % config.eval_interval == 0 or iter == config.max_iters - 1:
+    #     losses = estimate_loss()
+        # print(f"step {iter}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
 
     # sample a batch of data
     x, y = train_loader.next_batch()
     x,y = x.to(device=config.device), y.to(device=config.device)
     # evaluate the loss
-    logits, loss = model(x,y)
+    if torch.cuda.is_bf16_supported():
+        with torch.autocast(device_type=config.device, dtype=torch.bfloat16):
+            logits, loss = model(x,y)
+    else: # need to learn gradient scalers :(
+        logits, loss = model(x,y)
     optimizer.zero_grad(set_to_none=True)
     loss.backward()
     optimizer.step()
+    torch.cuda.synchronize()
+    t1 = time()
+    dt = (t1-t0)*1000
+    print(f"step: {iter} | train loss:{loss.item():.4f} | dt: {dt:.2f}ms")
 
 torch.save(model, 'llm_model.pt')
