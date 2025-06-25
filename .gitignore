@@ -3,3 +3,6 @@
 *.pth
 *.ckpt
 shakesphere.txt
+*.pyc
+*.pyo
+*.pyd
