@@ -63,6 +63,12 @@ class config:
 train_loader = DataLoader(B=config.batch_size, T=config.block_size)
 eval_loader  = DataLoader(B=config.batch_size, T=config.block_size)
 
+total_batch_size = 2**16
+B = config.batch_size
+T = config.block_size
+assert total_batch_size % (B * T) == 0, "make sure total_batch_size is divisible by B * T"
+grad_accum_steps = total_batch_size // (B * T)
+
 max_lr = 3e-4
 min_lr = max_lr*0.1
 warmup_steps = 25
@@ -116,16 +122,22 @@ for iter in range(config.max_iters):
         # print(f"step {iter}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
 
     # sample a batch of data
-    x, y = train_loader.next_batch()
-    x,y = x.to(device=config.device), y.to(device=config.device)
-    # evaluate the loss
-    if torch.cuda.is_bf16_supported(): # OPTIM 2 brought dt from 170 to 130
-        with torch.autocast(device_type=config.device, dtype=torch.bfloat16):
-            logits, loss = model(x,y)
-    else: # need to learn gradient scalers :(
-        logits, loss = model(x,y)
     optimizer.zero_grad(set_to_none=True)
-    loss.backward()
+    
+    loss_accum = 0.0 
+    for micro_step in range(grad_accum_steps):
+        x, y = train_loader.next_batch()
+        x,y = x.to(device=config.device), y.to(device=config.device)
+        # evaluate the loss
+        if torch.cuda.is_bf16_supported(): # OPTIM 2 brought dt from 170 to 130
+            with torch.autocast(device_type=config.device, dtype=torch.bfloat16):
+                logits, loss = model(x,y)
+        else: # need to learn gradient scalers :(
+            logits, loss = model(x,y)
+        loss = loss/grad_accum_steps
+        loss_accum += loss.detach()  
+        loss.backward()
+
     norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
     lr = get_lr(iter) # OPTIM 5 : i plugged in,now its almost 68ms
     for param_grp in optimizer.param_groups:
@@ -134,6 +146,6 @@ for iter in range(config.max_iters):
     torch.cuda.synchronize()
     t1 = time()
     dt = (t1-t0)*1000
-    print(f"step: {iter} | train loss:{loss.item():.4f} | dt: {dt:.2f}ms")
+    print(f"step: {iter} | train loss:{loss_accum.item():.4f} | dt: {dt:.2f}ms")
 
 torch.save(model, 'llm_model.pt')
