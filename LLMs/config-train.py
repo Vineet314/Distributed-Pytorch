@@ -77,7 +77,7 @@ def estimate_loss():
     return out
 
 model = LLM(config).to(config.device)
-if config.compile: # see you on linux in next commit!
+if config.compile: # OPTIM 3 brought dt from 130 to 95ms
     print("Compiling the model with torch.compile()")
     model = torch.compile(model)
 
