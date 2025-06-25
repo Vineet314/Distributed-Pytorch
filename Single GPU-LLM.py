@@ -8,27 +8,15 @@ In future commits, i will try to improve the code and make it more efficient.
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
+from dataclasses import dataclass
 
-# hyperparameters
-batch_size = 64 # how many independent sequences will we process in parallel?
-block_size = 256 # what is the maximum context length for predictions?
-max_iters = 500
-eval_interval = 50
-learning_rate = 3e-4
-device = 'cuda' if torch.cuda.is_available() else 'cpu'
-eval_iters = 200
-n_embd = 384
-n_head = 6
-n_layer = 6
-dropout = 0.2
-compile = False
 # training data
 with open('shakesphere.txt', 'r', encoding='utf-8') as f:
     text = f.read()
 
 # here are all the unique characters that occur in this text
 chars = sorted(list(set(text)))
-vocab_size = len(chars)
+vocab = len(chars)
 # create a mapping from characters to integers
 stoi = { ch:i for i,ch in enumerate(chars) }
 itos = { i:ch for i,ch in enumerate(chars) }
@@ -41,22 +29,41 @@ n = int(0.9*len(data)) # first 90% will be train, rest val
 train_data = data[:n]
 val_data = data[n:]
 
+@dataclass
+class config:
+    # hyperparameters
+    batch_size = 64 # how many independent sequences will we process in parallel?
+    block_size = 256 # what is the maximum context length for predictions?
+    vocab_size = vocab
+
+    max_iters = 500
+    eval_interval = 50
+    learning_rate = 3e-4
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    eval_iters = 200
+    compile = False
+
+    n_embd = 384
+    n_head = 6
+    n_layer = 6
+    dropout = 0.2
+
 class CausalSelfAttention(nn.Module):
     """ Multi-Head Attention """
 
-    def __init__(self, n_head, n_embd, dropout=0):
+    def __init__(self, config):
         super().__init__()
         # k,q,v in a btach
-        self.c_attn = nn.Linear(n_embd, 3*n_embd)
+        self.c_attn = nn.Linear(config.n_embd, 3*config.n_embd)
         # output projection
-        self.c_proj = nn.Linear(n_embd, n_embd)
+        self.c_proj = nn.Linear(config.n_embd, config.n_embd)
         # regularization
-        self.attn_dropout  = nn.Dropout(dropout)
-        self.resid_dropiut = nn.Dropout(dropout)
+        self.attn_dropout  = nn.Dropout(config.dropout)
+        self.resid_dropiut = nn.Dropout(config.dropout)
 
-        self.n_head  = n_head
-        self.n_embd  = n_embd
-        self.dropout = dropout
+        self.n_head  = config.n_head
+        self.n_embd  = config.n_embd
+        self.dropout = config.dropout
 
     def forward(self, x):
         # input of size (batch, time-step, channels)
@@ -78,12 +85,12 @@ class CausalSelfAttention(nn.Module):
 class MLP(nn.Module):
     """ a simple linear layer followed by a non-linearity """
 
-    def __init__(self, n_embd, dropout=0):
+    def __init__(self, config):
         super().__init__()
-        self.c_fc    = nn.Linear(n_embd, 4*n_embd)
+        self.c_fc    = nn.Linear(config.n_embd, 4*config.n_embd)
         self.gelu    = nn.GELU()
-        self.c_proj  = nn.Linear(4*n_embd, n_embd)
-        self.dropout = nn.Dropout(dropout)
+        self.c_proj  = nn.Linear(4*config.n_embd, config.n_embd)
+        self.dropout = nn.Dropout(config.dropout)
 
     def forward(self, x):
         x = self.c_fc(x)
@@ -94,13 +101,13 @@ class MLP(nn.Module):
 class Block(nn.Module):
     """ Transformer block: communication followed by computation """
 
-    def __init__(self, n_embd, n_head):
+    def __init__(self, config):
         # n_embd: embedding dimension, n_head: the number of heads we'd like
         super().__init__()
-        self.attn = CausalSelfAttention(n_head, n_embd, dropout)
-        self.mlp  = MLP(n_embd, dropout)
-        self.ln1  = nn.LayerNorm(n_embd)
-        self.ln2  = nn.LayerNorm(n_embd)
+        self.attn = CausalSelfAttention(config.n_head, config.n_embd, config.dropout)
+        self.mlp  = MLP(config.n_embd, config.dropout)
+        self.ln1  = nn.LayerNorm(config.n_embd)
+        self.ln2  = nn.LayerNorm(config.n_embd)
 
     def forward(self, x):
         x = x + self.attn(self.ln1(x))
@@ -109,18 +116,18 @@ class Block(nn.Module):
 
 class LLM(nn.Module):
     """ A simple GPT-like language model """
-    def __init__(self, vocab_size, block_size, n_embd, dropout, n_head, n_layer):
+    def __init__(self, config):
         super().__init__()
-        self.block_size = self.block_size
-        self.tkn_emb = nn.Embedding(vocab_size, n_embd)
-        self.pos_emb = nn.Embedding(block_size, n_embd)
+        self.block_size = config.block_size
+        self.tkn_emb = nn.Embedding(config.vocab_size, config.n_embd)
+        self.pos_emb = nn.Embedding(config.block_size, config.n_embd)
 
         self.transformer = nn.ModuleDict(dict(
-            drop = nn.Dropout(dropout),
-            h = nn.ModuleList([Block(n_embd, n_head) for _ in range(n_layer)]),
-            ln_f = nn.LayerNorm(n_embd)))
+            drop = nn.Dropout(config.dropout),
+            h = nn.ModuleList([Block(config.n_embd, config.n_head) for _ in range(config.n_layer)]),
+            ln_f = nn.LayerNorm(config.n_embd)))
 
-        self.lm_head = nn.Linear(n_embd, vocab_size, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
 
         self.tkn_emb.weight  = self.lm_head.weight
 
@@ -161,7 +168,7 @@ class LLM(nn.Module):
         # idx is (B, T) array of indices in the current context
         for _ in range(max_new_tokens):
             # crop idx to the last block_size tokens
-            idx_cond = idx[:, -block_size:]
+            idx_cond = idx[:, -self.block_size:]
             # get the predictions
             logits, _ = self(idx_cond)
             # focus only on the last time step
@@ -177,10 +184,10 @@ class LLM(nn.Module):
 def get_batch(split):
     # generate a small batch of data of inputs x and targets y
     data = train_data if split == 'train' else val_data
-    ix = torch.randint(len(data) - block_size, (batch_size,))
-    x = torch.stack([data[i:i+block_size] for i in ix])
-    y = torch.stack([data[i+1:i+block_size+1] for i in ix])
-    x, y = x.to(device), y.to(device)
+    ix = torch.randint(len(data) - config.block_size, (config.batch_size,))
+    x = torch.stack([data[i:i+config.block_size] for i in ix])
+    y = torch.stack([data[i+1:i+config.block_size+1] for i in ix])
+    x, y = x.to(config.device), y.to(config.device)
     return x, y
 
 @torch.no_grad()
@@ -188,8 +195,8 @@ def estimate_loss():
     out = {}
     model.eval()
     for split in ['train', 'val']:
-        losses = torch.zeros(eval_iters)
-        for k in range(eval_iters):
+        losses = torch.zeros(config.eval_iters)
+        for k in range(config.eval_iters):
             X, Y = get_batch(split)
             logits, loss = model(X, Y)
             losses[k] = loss.item()
@@ -197,17 +204,17 @@ def estimate_loss():
     model.train()
     return out
 
-model = LLM().to(device)
+model = LLM().to(config.device)
 if compile:
     print("Compiling the model with torch.compile()")
     model = torch.compile(model)
 
-optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
+optimizer = torch.optim.AdamW(model.parameters(), lr=config.learning_rate)
 
-for iter in range(max_iters):
+for iter in range(config.max_iters):
 
     # every once in a while evaluate the loss on train and val sets
-    if iter % eval_interval == 0 or iter == max_iters - 1:
+    if iter % config.eval_interval == 0 or iter == config.max_iters - 1:
         losses = estimate_loss()
         print(f"step {iter}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
 
