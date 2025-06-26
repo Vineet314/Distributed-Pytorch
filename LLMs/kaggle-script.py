@@ -24,6 +24,7 @@ import torch.nn.functional as F
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
+from torch.utils.data import IterableDataset, DataLoader
 
 assert torch.cuda.is_available(), "Get a GPU. bring more than 1"
 assert torch.cuda.device_count() > 1, "Told you to bring more than one" 
@@ -31,6 +32,7 @@ assert torch.cuda.device_count() > 1, "Told you to bring more than one"
 torch.manual_seed(1729)
 torch.cuda.manual_seed(1729)
 torch.set_float32_matmul_precision("high")
+# torch.set_default_dtype(torch.float16) # This increased efficieincy by almost 20%, but strongly NOT recommended. But was worth a try
 
 # start of model script
 
@@ -207,34 +209,6 @@ class LLM(nn.Module):
 
 # end of model script
 
-class DataLoader:
-    def __init__(self, B, T, process_rank, num_processes):
-        self.B = B
-        self.T = T
-        self.process_rank = process_rank
-        self.num_processes = num_processes
-
-        enc = tiktoken.get_encoding('gpt2')
-        # training data
-        url = "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt"
-        text = requests.get(url).text
-        tokens = enc.encode(text)
-        self.tokens = torch.tensor(tokens)
-
-        self.current_position = self.B * self.T * self.process_rank
-    
-    def next_batch(self):
-        B, T = self.B, self.T
-        buf = self.tokens[self.current_position: self.current_position+(B*T+1)]
-        x = (buf[:-1]).view(B,T)
-        y = (buf[1:]).view(B,T)
-        # advance the position
-        self.current_position += B*T*self.num_processes
-
-        if self.current_position + (B*T*self.num_processes +1)  > len(self.tokens):
-            self.current_position = self.B * self.T * self.process_rank  # reset to the beginning for the next epoch
-        return x,y
-
 @dataclass
 class config:
     # data params
@@ -257,6 +231,42 @@ class config:
     warmup_steps = 25
     max_decay_steps = 75
 
+class My_Dataset(IterableDataset):
+    def __init__(self, tokens, B, T):
+        super().__init__()
+        self.tokens = tokens
+        self.B = B
+        self.T = T
+
+    def __iter__(self):
+        # Get the rank and world size to ensure each GPU gets a unique shard of data
+        worker_info = torch.utils.data.get_worker_info()
+        rank = dist.get_rank() if dist.is_initialized() else 0
+        world_size = dist.get_world_size() if dist.is_initialized() else 1
+
+        # Create a shard of the data for the current process
+        num_tokens = len(self.tokens)
+        tokens_per_process = num_tokens // world_size
+        start = rank * tokens_per_process
+        end = start + tokens_per_process
+
+        # This is a simplified sharding. More robust methods exist.
+        data = self.tokens[start:end]
+
+        while True: # Loop indefinitely for epochs
+            # Generate random starting points for batches
+            ix = torch.randint(0, len(data) - self.T, (self.B,))
+            x = torch.stack([data[i:i+self.T] for i in ix])
+            y = torch.stack([data[i+1:i+self.T+1] for i in ix])
+            yield x, y
+
+url = "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt"
+text = requests.get(url).text
+enc = tiktoken.get_encoding('gpt2')
+all_tokens = torch.tensor(enc.encode(text), dtype=torch.long)
+train_dataset = My_Dataset(all_tokens, config.batch_size, config.block_size)
+train_loader = DataLoader(train_dataset, batch_size=None, num_workers=2, pin_memory=True) 
+train_iter = iter(train_loader)
 # ___________ CLI-OVERRIDE__________________
 
 for arg in sys.argv[1:]: # args after script.py
@@ -330,7 +340,8 @@ for iter in range(config.max_iters):
     loss_accum = 0.0 
     for micro_step in range(grad_accum_steps):
         # sample a batch of data
-        x, y = train_loader.next_batch()
+        # x, y = train_loader.next_batch()
+        x, y = next(train_iter)
         x,y = x.to(device=device), y.to(device=device)
         # sync gradients only on the last micro step
         # this is to avoid unnecessary synchronization overhead as we are accumulating gradients
