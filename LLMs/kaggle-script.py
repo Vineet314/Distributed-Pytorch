@@ -232,6 +232,10 @@ class config:
     warmup_steps = 25
     max_decay_steps = 75
 
+device_type = 'cuda'
+dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+ctx = torch.autocast(device_type=device_type, dtype=dtype)
+
 # ___________ CLI-OVERRIDE__________________
 
 for arg in sys.argv[1:]: # args after script.py
@@ -286,7 +290,6 @@ ddp_world_size = int(os.environ['WORLD_SIZE'])
 device = f"cuda:{ddp_local_rank}"
 torch.cuda.set_device(device)
 master_process = ddp_rank == 0
-device_type = "cuda"
 
 #___________GRAD_ACCUM SETUP_____________
 
@@ -331,16 +334,19 @@ optimizer = raw_model.configure_optimizers(weight_decay=0.1,learning_rate=3e-4,d
 train_loader = DataLoader(train_dataset, batch_size=None, num_workers=2, pin_memory=True) 
 train_iter = iter(train_loader)
 
+scaler = torch.amp.GradScaler(enabled=(device_type == 'cuda'))
+
 for iter in range(config.max_iters):
-    t0 = time() 
+    t0 = time()
+    lr = get_lr(iter) 
+    for param_grp in optimizer.param_groups:
+        param_grp['lr'] = lr
     # every once in a while evaluate the loss on train and val sets
     # if iter % config.eval_interval == 0 or iter == config.max_iters - 1:
     #     losses = estimate_loss()
         # print(f"step {iter}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
-
-    optimizer.zero_grad(set_to_none=True)
-    
     loss_accum = 0.0 
+
     for micro_step in range(grad_accum_steps):
         # sample a batch of data
         # x, y = train_loader.next_batch()
@@ -351,21 +357,20 @@ for iter in range(config.max_iters):
         # this is a hack to avoid the DDP warning about gradient synchronization
         model.require_backward_grad_sync = (micro_step == grad_accum_steps - 1)
         # evaluate the loss
-        if torch.cuda.is_bf16_supported(): 
-            with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
-                logits, loss = model(x,y)
-        else: # need to learn gradient scalers :(
+        with ctx:
             logits, loss = model(x,y)
-        loss = loss/grad_accum_steps
-        loss_accum += loss.detach()  
-        loss.backward()
-        dist.all_reduce(loss_accum, op=dist.ReduceOp.SUM)
+            loss = loss/grad_accum_steps
 
+        loss_accum += loss.detach()  
+        scaler.scale(loss).backward()
+
+    dist.all_reduce(loss_accum, op=dist.ReduceOp.SUM)
+    # grad clipping
+    scaler.unscale_(optimizer)
     norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-    lr = get_lr(iter) 
-    for param_grp in optimizer.param_groups:
-        param_grp['lr'] = lr
-    optimizer.step()
+    scaler.step(optimizer)
+    scaler.update()    
+    optimizer.zero_grad(set_to_none=True)
     torch.cuda.synchronize()
     dt = (time()-t0)*1000
     if master_process : print(f"step: {iter} | train loss:{loss_accum.item():.4f} | dt: {dt:.2f}ms")
