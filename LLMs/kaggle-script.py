@@ -34,7 +34,7 @@ torch.cuda.manual_seed(1729)
 torch.set_float32_matmul_precision("high")
 # torch.set_default_dtype(torch.float16) # This increased efficieincy by almost 20%, but strongly NOT recommended. But was worth a try
 
-# start of model script
+# ________ START OF MODEL SCRIPT________
 
 class CausalSelfAttention(nn.Module):
     """ Multi-Head Attention """
@@ -207,8 +207,9 @@ class LLM(nn.Module):
             idx = torch.cat((idx, idx_next), dim=1) # (B, T+1)
         return idx
 
-# end of model script
+# ________ END OF MODEL SCRIPT________
 
+# ____________PARAMS-CONFIG_________________
 @dataclass
 class config:
     # data params
@@ -230,6 +231,16 @@ class config:
     min_lr = max_lr*0.1
     warmup_steps = 25
     max_decay_steps = 75
+
+# ___________ CLI-OVERRIDE__________________
+
+for arg in sys.argv[1:]: # args after script.py
+    assert (('=' in arg) and (arg.startswith('--'))), "Correct usage : ... script.py --key1=val1 --key2=val2"
+    key, val = arg[2:].split('=')    # ignore the '--' at start, split after '='
+    assert hasattr(config, key), f"invalid argument : {key}"
+    setattr(config, key, eval(val)) 
+
+# _______________ DATASET _________________
 
 class My_Dataset(IterableDataset):
     def __init__(self, tokens, B, T):
@@ -265,16 +276,7 @@ text = requests.get(url).text
 enc = tiktoken.get_encoding('gpt2')
 all_tokens = torch.tensor(enc.encode(text), dtype=torch.long)
 train_dataset = My_Dataset(all_tokens, config.batch_size, config.block_size)
-train_loader = DataLoader(train_dataset, batch_size=None, num_workers=2, pin_memory=True) 
-train_iter = iter(train_loader)
-# ___________ CLI-OVERRIDE__________________
 
-for arg in sys.argv[1:]: # args after script.py
-    assert (('=' in arg) and (arg.startswith('--'))), "Correct usage : ... script.py --key1=val1 --key2=val2"
-    key, val = arg[2:].split('=')    # ignore the '--' at start, split after '='
-    assert hasattr(config, key), f"invalid argument : {key}"
-    setattr(config, key, eval(val)) 
-    
 # _______________DDP setup_________________
 
 init_process_group(backend='nccl')
@@ -326,7 +328,8 @@ def get_lr(iter):
 
 # ______________TRAINING____________________
 optimizer = raw_model.configure_optimizers(weight_decay=0.1,learning_rate=3e-4,device=device,prints=False)
-train_loader = DataLoader(B=config.batch_size, T=config.block_size, process_rank=ddp_rank, num_processes=ddp_world_size)
+train_loader = DataLoader(train_dataset, batch_size=None, num_workers=2, pin_memory=True) 
+train_iter = iter(train_loader)
 
 for iter in range(config.max_iters):
     t0 = time() 
