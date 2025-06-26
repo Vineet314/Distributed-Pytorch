@@ -1,9 +1,8 @@
-'''This script defines a simple LLM model using a sinle GPU.
+'''This script defines a simple LLM model which can be trained on a single node with multiple GPUs.
 This code is highly inspired by Andrej Karpathy's work on his nanoGPT :
 https://github.com/karpathy/nanoGPT
 
-All the inefficiencies in the code basic-llm.py have been handled.
-With torch.compile(), this code is a highly efficient implementation of an LLM on a single GPU. 
+All the inefficiencies in the code basic-llm.py have been addressed.
 Although, algorithmic rewrites can be implemented like the grouped query attention, MHLA, etc.
 '''
 import tiktoken, os, math
@@ -55,6 +54,7 @@ class DataLoader:
 @dataclass
 class config:
     # hyperparameters
+    # hard-coded for now, will add CLI argparse later
     batch_size = 4 # how many independent sequences will we process in parallel?
     block_size = 1024 # what is the maximum context length for predictions?
     vocab_size = 50304
