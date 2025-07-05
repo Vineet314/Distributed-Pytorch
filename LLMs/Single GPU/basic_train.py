@@ -61,11 +61,11 @@ def get_batch(split, config):
     x, y = x.to(config.device), y.to(config.device)
     return x, y
 
-max_lr = config.learning_rate
-min_lr = max_lr*0.1
-warmup_steps = 25
-max_decay_steps = 75
-def get_lr(iter):
+def get_lr(iter, config):
+    max_lr = config.learning_rate
+    min_lr = max_lr*0.1
+    warmup_steps = 25
+    max_decay_steps = 75
     # 1) linear warump for warmup_steps:
     if iter < warmup_steps:
         return max_lr * (iter+1)/warmup_steps
@@ -108,7 +108,7 @@ def parse_args():
     parser.add_argument('--dropout',       type=float, default=config.dropout,       help='Dropout rate')
     return parser.parse_args()
 
-def main(model, config):
+def main(model, config, optimizer):
     for iter in range(config.max_iters):
         t0 = time()
         # every once in a while evaluate the loss on train and val sets
@@ -124,7 +124,7 @@ def main(model, config):
         optimizer.zero_grad()
         loss.backward()
         # implementing LR scheduler
-        lr = get_lr(iter)
+        lr = get_lr(iter, config)
         for param_grp in optimizer.param_groups:
             param_grp['lr'] = lr
         optimizer.step()
@@ -142,4 +142,4 @@ if __name__ == "__main__":
     
     model = LLM(config).to(config.device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=config.learning_rate)
-    main(model, config)
+    main(model, config, optimizer)

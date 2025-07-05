@@ -12,7 +12,7 @@ class CausalSelfAttention(nn.Module):
 
     def __init__(self, config):
         super().__init__()
-        assert config.n_emdb % config.n_head == 0, "n_embd must be divisible by n_head"
+        assert config.n_embd % config.n_head == 0, "n_embd must be divisible by n_head"
         # k,q,v in a btach
         self.c_attn = nn.Linear(config.n_embd, 3*config.n_embd)
         # output projection
