@@ -121,11 +121,9 @@ def parse_args():
     parser.add_argument('--vocab_size',    type=int,   default=config.vocab_size,    help='Vocabulary size for the model')
     parser.add_argument('--warmup_steps',  type=int,   default=config.warmup_steps,  help='Number of warmup steps for learning rate')
     parser.add_argument('--max_decay_steps',type=int, default=config.max_decay_steps, help='Maximum decay steps for learning rate')
-    parser.add_argument('--max_new_tokens', type=float, default=config.max_new_tokens, help='Number of tokens in generation')
     # parser.add_argument('--total_batch_size', type=int,default=config.total_batch_size, help='Total batch size for training')
     parser.add_argument('--total_batch_size_str', type=str,      default='2**16',    help='Total batch size for training passed in as a string expression')
     parser.add_argument('--compile', action='store_true', help='Whether to compile the model with torch.compile()')
-    parser.add_argument('--generate',   action='store_true', help='Whether to generate sample after model completes training')
     parser.add_argument('--save_model', action='store_true', help='Whether to save the model after training')
     return parser.parse_args()
 
@@ -174,8 +172,8 @@ def main(model:LLM, config:config, optimizer:torch.optim.Optimizer):
         print(f"step: {iter} | train loss:{loss_accum:.4f} | dt: {dt:.2f}ms | grad_acum_steps:{grad_accum_steps}")
 
     if config.save_model:
-        torch.save(model, 'train runs/flash_llm_model.pt')
-        print("\nsaved run to train runs/flash_llm_model.pt")
+        torch.save(model, 'flash_llm_model.pt')
+        print("\nsaved run to flash_llm_model.pt")
 
 if __name__ == '__main__':
     args = parse_args()
