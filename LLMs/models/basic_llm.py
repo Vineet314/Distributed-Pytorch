@@ -10,14 +10,6 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 
-# hyperparameters
-# block_size = 1024 # what is the maximum context length for predictions?
-# device = 'cuda' if torch.cuda.is_available() else 'cpu'
-# n_embd = 384
-# n_head = 6
-# n_layer = 6
-# dropout = 0.2
-
 class Head(nn.Module):
     """ one head of self-attention """
 
