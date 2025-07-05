@@ -42,6 +42,7 @@ class config:
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     eval_iters = 200
     compile = False if os.name != 'posix' else True
+    save_model = True
 
     n_embd = 384
     n_head = 6
@@ -119,14 +120,16 @@ def parse_args():
     parser.add_argument('--dropout',       type=float, default=config.dropout,       help='Dropout rate')
     parser.add_argument('--vocab_size',    type=int,   default=config.vocab_size,    help='Vocabulary size for the model')
     parser.add_argument('--warmup_steps',  type=int,   default=config.warmup_steps,  help='Number of warmup steps for learning rate')
-    parser.add_argument('--max_decay_steps', type=int, default=config.max_decay_steps, help='Maximum decay steps for learning rate')
+    parser.add_argument('--max_decay_steps',type=int, default=config.max_decay_steps, help='Maximum decay steps for learning rate')
+    parser.add_argument('--max_new_tokens', type=float, default=config.max_new_tokens, help='Number of tokens in generation')
     # parser.add_argument('--total_batch_size', type=int,default=config.total_batch_size, help='Total batch size for training')
     parser.add_argument('--total_batch_size_str', type=str,      default='2**16',    help='Total batch size for training passed in as a string expression')
     parser.add_argument('--compile', action='store_true', help='Whether to compile the model with torch.compile()')
-
+    parser.add_argument('--generate',   action='store_true', help='Whether to generate sample after model completes training')
+    parser.add_argument('--save_model', action='store_true', help='Whether to save the model after training')
     return parser.parse_args()
 
-def main(model, config, optimizer):
+def main(model:LLM, config:config, optimizer:torch.optim.Optimizer):
     B = config.batch_size
     T = config.block_size
     assert config.total_batch_size % (B * T) == 0, "make sure total_batch_size is divisible by B * T"
@@ -136,16 +139,17 @@ def main(model, config, optimizer):
     eval_loader  = DataLoader(B=config.batch_size, T=config.block_size)
 
     for iter in range(config.max_iters):
+        t3 = t4 = 0
         t0 = time() 
         # every once in a while evaluate the loss on train and val sets
         # if iter % config.eval_interval == 0 or iter == config.max_iters - 1:
+            # t3 = time()
         #     losses = estimate_loss(model, config, eval_loader)
             # print(f"step {iter}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
-
-        # sample a batch of data
+            # t4 = time()
         optimizer.zero_grad(set_to_none=True)
-        
         loss_accum = 0.0 
+
         for micro_step in range(grad_accum_steps):
             x, y = train_loader.next_batch()
             x,y = x.to(device=config.device), y.to(device=config.device)
@@ -166,11 +170,12 @@ def main(model, config, optimizer):
         optimizer.step()
         torch.cuda.synchronize()
         t1 = time()
-        dt = (t1-t0)*1000
+        dt = (t1-t0-(t4-t3))*1000
         print(f"step: {iter} | train loss:{loss_accum:.4f} | dt: {dt:.2f}ms | grad_acum_steps:{grad_accum_steps}")
 
-    torch.save(model, 'train runs/flash_llm_model.pt')
-    print("\nsaved run to train runs/flashj_llm_model.pt")
+    if config.save_model:
+        torch.save(model, 'train runs/flash_llm_model.pt')
+        print("\nsaved run to train runs/flash_llm_model.pt")
 
 if __name__ == '__main__':
     args = parse_args()
