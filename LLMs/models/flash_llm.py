@@ -1,3 +1,7 @@
+'''Improves upon the basic attention implementation by using F.scaled_dot_product_attention, 
+Which is the Flash Attention implementation in PyTorch. 
+Along with other efficienct improvements, this code runs much faster.
+'''
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
@@ -69,7 +73,7 @@ class Block(nn.Module):
         x = x + self.mlp(self.ln2(x))
         return x
 
-class LLM(nn.Module):
+class FlashLLM(nn.Module):
     """ A simple GPT-like language model """
     def __init__(self, config):
         super().__init__()

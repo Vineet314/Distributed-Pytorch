@@ -9,7 +9,7 @@ import tiktoken, os, math
 
 from dataclasses import dataclass
 from time import time
-from LLMs.models.model import LLM
+from LLMs.models.flash_llm import LLM
 
 from torch.distributed import init_process_group, destroy_process_group
 from torch.nn.parallel import DistributedDataParallel as DDP

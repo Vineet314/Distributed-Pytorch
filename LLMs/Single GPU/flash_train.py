@@ -1,8 +1,8 @@
-'''This script defines a simple LLM model using a sinle GPU.
+'''This trains a simple LLM model using a sinle GPU.
 This code is highly inspired by Andrej Karpathy's work on his nanoGPT :
 https://github.com/karpathy/nanoGPT
 
-All the inefficiencies in the code basic-llm.py have been handled.
+All the inefficiencies in the code basic_train.py have been handled.
 With torch.compile(), this code is a highly efficient implementation of an LLM on a single GPU. 
 Although, algorithmic rewrites can be implemented like the grouped query attention, MHLA, etc.
 '''
@@ -13,7 +13,8 @@ import os
 
 from dataclasses import dataclass
 from time import time
-from LLMs.models.model import LLM
+
+from ..models.flash_llm import FlashLLM
 
 torch.set_float32_matmul_precision("high") # OPTIM 1 brought dt from 230 to 170
 
@@ -104,7 +105,7 @@ def estimate_loss():
     model.train()
     return out
 
-model = LLM(config).to(config.device)
+model = FlashLLM(config).to(config.device)
 if config.compile: # OPTIM 3 brought dt from 130 to 95ms
     print("Compiling the model with torch.compile()")
     model = torch.compile(model)
@@ -133,7 +134,7 @@ for iter in range(config.max_iters):
         if torch.cuda.is_bf16_supported(): # OPTIM 2 brought dt from 170 to 130
             with torch.autocast(device_type=config.device, dtype=torch.bfloat16):
                 logits, loss = model(x,y)
-        else: # need to learn gradient scalers :(
+        else: # need to learn about gradient scalers :(
             logits, loss = model(x,y)
         loss = loss/grad_accum_steps
         loss_accum += loss.detach()  
@@ -149,4 +150,4 @@ for iter in range(config.max_iters):
     dt = (t1-t0)*1000
     print(f"step: {iter} | train loss:{loss_accum.item():.4f} | dt: {dt:.2f}ms")
 
-torch.save(model, 'models/llm_model.pt')
+torch.save(model, '../train runs/flash_llm_model.pt')
