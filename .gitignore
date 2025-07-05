@@ -6,7 +6,7 @@
 *.pyo
 *.pyd
 LLMs/data/
-LLMs/models/
+LLMs/train\ runs/
 CNNs/data/
 LLMs/__pycache__
 CNNs/__pycache__

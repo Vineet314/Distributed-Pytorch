@@ -247,4 +247,4 @@ for iter in range(max_iters):
     dt = 1000*(t1-t0)
     print(f"step: {iter} | train loss:{loss.item():.4f} | dt: {dt:.2f}ms")
 
-torch.save(model, 'models./basic_llm_model.pt')
+torch.save(model, 'models/basic_llm_model.pt')
