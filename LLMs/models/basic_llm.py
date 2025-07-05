@@ -15,7 +15,7 @@ class Head(nn.Module):
 
     def __init__(self, config):
         super().__init__()
-        assert config.n_emdb % config.n_head == 0, "n_embd must be divisible by n_head"
+        assert config.n_embd % config.n_head == 0, "n_embd must be divisible by n_head"
         head_size = config.n_embd // config.n_head
         self.key = nn.Linear(config.n_embd, head_size, bias=False)
         self.query = nn.Linear(config.n_embd, head_size, bias=False)

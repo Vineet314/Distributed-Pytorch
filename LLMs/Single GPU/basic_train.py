@@ -32,6 +32,9 @@ class config:
     n_layer = 6
     dropout = 0.2
     vocab_size = None
+    generate = True
+    max_new_tokens = 500
+    save_model = True
 
 # training data
 with open('data/shakesphere.txt', 'r', encoding='utf-8') as f: # on branch master
@@ -87,7 +90,7 @@ def estimate_loss(model, config):
         losses = torch.zeros(config.eval_iters)
         for k in range(config.eval_iters):
             X, Y = get_batch(split, config)
-            logits, loss = model(X, Y)
+            _, loss = model(X, Y)
             losses[k] = loss.item()
         out[split] = losses.mean()
     model.train()
@@ -95,32 +98,37 @@ def estimate_loss(model, config):
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Train a simple LLM model')
-    parser.add_argument('--batch_size',    type=int,   default=config.batch_size,    help='Batch size for training')
-    parser.add_argument('--block_size',    type=int,   default=config.block_size,    help='Block size for training')
-    parser.add_argument('--max_iters',     type=int,   default=config.max_iters,     help='Maximum number of iterations for training')
-    parser.add_argument('--eval_interval', type=int,   default=config.eval_interval, help='Interval for evaluation')
-    parser.add_argument('--learning_rate', type=float, default=config.learning_rate, help='Learning rate for training')
-    parser.add_argument('--device',        type=str,   default=config.device,        help='Device to use for training (cpu or cuda)')
-    parser.add_argument('--eval_iters',    type=int,   default=config.eval_iters,    help='Number of iterations for evaluation')
-    parser.add_argument('--n_embd',        type=int,   default=config.n_embd,        help='Number of embedding dimensions')
-    parser.add_argument('--n_head',        type=int,   default=config.n_head,        help='Number of attention heads')
-    parser.add_argument('--n_layer',       type=int,   default=config.n_layer,       help='Number of layers in the model')
-    parser.add_argument('--dropout',       type=float, default=config.dropout,       help='Dropout rate')
+    parser.add_argument('--batch_size',     type=int,   default=config.batch_size,     help='Batch size for training')
+    parser.add_argument('--block_size',     type=int,   default=config.block_size,     help='Block size for training')
+    parser.add_argument('--max_iters',      type=int,   default=config.max_iters,      help='Maximum number of iterations for training')
+    parser.add_argument('--eval_interval',  type=int,   default=config.eval_interval,  help='Interval for evaluation')
+    parser.add_argument('--learning_rate',  type=float, default=config.learning_rate,  help='Learning rate for training')
+    parser.add_argument('--device',         type=str,   default=config.device,         help='Device to use for training (cpu or cuda)')
+    parser.add_argument('--eval_iters',     type=int,   default=config.eval_iters,     help='Number of iterations for evaluation')
+    parser.add_argument('--n_embd',         type=int,   default=config.n_embd,         help='Number of embedding dimensions')
+    parser.add_argument('--n_head',         type=int,   default=config.n_head,         help='Number of attention heads')
+    parser.add_argument('--n_layer',        type=int,   default=config.n_layer,        help='Number of layers in the model')
+    parser.add_argument('--dropout',        type=float, default=config.dropout,        help='Dropout rate')
+    parser.add_argument('--max_new_tokens', type=float, default=config.max_new_tokens, help='Number of tokens in generation')
+    parser.add_argument('--generate',   action='store_true', help='Whether to generate sample after model completes training')
+    parser.add_argument('--save_model', action='store_true', help='Whether to save the model after training')
     return parser.parse_args()
 
-def main(model, config, optimizer):
+def main(model:LLM, config:config, optimizer:torch.optim.Optimizer):
     for iter in range(config.max_iters):
+        t3 = t4 = 0
         t0 = time()
         # every once in a while evaluate the loss on train and val sets
-        # if iter % eval_interval == 0 or iter == config.max_iters - 1:
-        #     losses = estimate_loss(model, config)
-        #     print(f"step {iter}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
-
+        if (iter % config.eval_interval == 0) or (iter == config.max_iters - 1):
+            t3 = time()
+            losses = estimate_loss(model, config)
+            print(f"-----val run at step {iter}-----: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
+            t4 = time()
         # sample a batch of data
         xb, yb = get_batch('train', config)
 
         # evaluate the loss
-        logits, loss = model(xb, yb)
+        _, loss = model(xb, yb)
         optimizer.zero_grad()
         loss.backward()
         # implementing LR scheduler
@@ -129,11 +137,20 @@ def main(model, config, optimizer):
             param_grp['lr'] = lr
         optimizer.step()
         t1 = time()
-        dt = 1000*(t1-t0)
+        dt = 1000*(t1-t0-(t4-t3))
         print(f"step: {iter} | train loss:{loss.item():.4f} | dt: {dt:.2f}ms")
 
-    torch.save(model, 'train runs/basic_llm_model.pt')
-    print("\nsaved run to train runs/basic_llm_model.pt")
+    if config.save_model:
+        torch.save(model, 'train runs/basic_llm_model.pt')
+        print("\nsaved run to train runs/basic_llm_model.pt")
+
+    if config.generate:
+        t5 = time()
+        with torch.no_grad():
+            start = torch.tensor(encode('\n'), dtype=torch.long, device=config.device).view(1,-1)
+            sample = model.generate(start, config.max_new_tokens)
+        dt = time()-t5
+        print(f'Time taken to generate = {dt:.2f}s\n\n--------------------------------------\n\n{decode(sample[0].tolist())}')
 
 if __name__ == "__main__":
     args = parse_args()
