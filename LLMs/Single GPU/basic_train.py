@@ -13,6 +13,7 @@ import os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))) # to find the models dir
 
 import torch
+import argparse
 
 from models.basic_llm import LLM
 from time import time
@@ -51,7 +52,7 @@ n = int(0.9*len(data)) # first 90% will be train, rest val
 train_data = data[:n]
 val_data = data[n:]
 
-def get_batch(split):
+def get_batch(split, config):
     # generate a small batch of data of inputs x and targets y
     data = train_data if split == 'train' else val_data
     ix = torch.randint(len(data) - config.block_size, (config.batch_size,))
@@ -60,7 +61,7 @@ def get_batch(split):
     x, y = x.to(config.device), y.to(config.device)
     return x, y
 
-max_lr = 3e-4
+max_lr = config.learning_rate
 min_lr = max_lr*0.1
 warmup_steps = 25
 max_decay_steps = 75
@@ -79,44 +80,66 @@ def get_lr(iter):
         return min_lr + coeff * (max_lr - min_lr)
 
 @torch.no_grad()
-def estimate_loss():
+def estimate_loss(model, config):
     out = {}
     model.eval()
     for split in ['train', 'val']:
         losses = torch.zeros(config.eval_iters)
         for k in range(config.eval_iters):
-            X, Y = get_batch(split)
+            X, Y = get_batch(split, config)
             logits, loss = model(X, Y)
             losses[k] = loss.item()
         out[split] = losses.mean()
     model.train()
     return out
 
-model = LLM(config).to(config.device)
+def parse_args():
+    parser = argparse.ArgumentParser(description='Train a simple LLM model')
+    parser.add_argument('--batch_size',    type=int,   default=config.batch_size,    help='Batch size for training')
+    parser.add_argument('--block_size',    type=int,   default=config.block_size,    help='Block size for training')
+    parser.add_argument('--max_iters',     type=int,   default=config.max_iters,     help='Maximum number of iterations for training')
+    parser.add_argument('--eval_interval', type=int,   default=config.eval_interval, help='Interval for evaluation')
+    parser.add_argument('--learning_rate', type=float, default=config.learning_rate, help='Learning rate for training')
+    parser.add_argument('--device',        type=str,   default=config.device,        help='Device to use for training (cpu or cuda)')
+    parser.add_argument('--eval_iters',    type=int,   default=config.eval_iters,    help='Number of iterations for evaluation')
+    parser.add_argument('--n_embd',        type=int,   default=config.n_embd,        help='Number of embedding dimensions')
+    parser.add_argument('--n_head',        type=int,   default=config.n_head,        help='Number of attention heads')
+    parser.add_argument('--n_layer',       type=int,   default=config.n_layer,       help='Number of layers in the model')
+    parser.add_argument('--dropout',       type=float, default=config.dropout,       help='Dropout rate')
+    return parser.parse_args()
 
-optimizer = torch.optim.AdamW(model.parameters(), lr=config.learning_rate)
+def main(model, config):
+    for iter in range(config.max_iters):
+        t0 = time()
+        # every once in a while evaluate the loss on train and val sets
+        # if iter % eval_interval == 0 or iter == config.max_iters - 1:
+        #     losses = estimate_loss(model, config)
+        #     print(f"step {iter}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
 
-for iter in range(config.max_iters):
-    t0 = time()
-    # every once in a while evaluate the loss on train and val sets
-    # if iter % eval_interval == 0 or iter == config.max_iters - 1:
-    #     losses = estimate_loss()
-    #     print(f"step {iter}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
+        # sample a batch of data
+        xb, yb = get_batch('train', config)
 
-    # sample a batch of data
-    xb, yb = get_batch('train')
+        # evaluate the loss
+        logits, loss = model(xb, yb)
+        optimizer.zero_grad()
+        loss.backward()
+        # implementing LR scheduler
+        lr = get_lr(iter)
+        for param_grp in optimizer.param_groups:
+            param_grp['lr'] = lr
+        optimizer.step()
+        t1 = time()
+        dt = 1000*(t1-t0)
+        print(f"step: {iter} | train loss:{loss.item():.4f} | dt: {dt:.2f}ms")
 
-    # evaluate the loss
-    logits, loss = model(xb, yb)
-    optimizer.zero_grad(set_to_none=True)
-    loss.backward()
-    # implementing LR scheduler
-    lr = get_lr(iter)
-    for param_grp in optimizer.param_groups:
-        param_grp['lr'] = lr
-    optimizer.step()
-    t1 = time()
-    dt = 1000*(t1-t0)
-    print(f"step: {iter} | train loss:{loss.item():.4f} | dt: {dt:.2f}ms")
+    torch.save(model, 'train runs/basic_llm_model.pt')
+    print("\nsaved run to train runs/basic_llm_model.pt")
 
-torch.save(model, 'train runs/basic_llm_model.pt')
+if __name__ == "__main__":
+    args = parse_args()
+    for attr, value in vars(args).items():
+        setattr(config, attr, value)
+    
+    model = LLM(config).to(config.device)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=config.learning_rate)
+    main(model, config)
