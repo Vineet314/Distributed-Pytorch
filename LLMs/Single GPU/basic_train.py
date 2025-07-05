@@ -4,32 +4,41 @@ https://github.com/karpathy/nanoGPT
 
 There are a lot of inefficiencies in the code, but it is a good starting point to understand how to build a simple LLM.
 In future commits, i will try to improve the code and make it more efficient.
+
+This script is to be run from LLMs dir as :
+python "Single GPU/basic_train.py"
 '''
+import sys
+import os
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))) # to find the models dir
 
 import torch
 
-from ..models.basic_llm import BasicLLM
+from models.basic_llm import LLM
 from time import time
 
 # hyperparameters
-batch_size = 4 # how many independent sequences will we process in parallel?
-block_size = 1024 # what is the maximum context length for predictions?
-max_iters = 500
-eval_interval = 50
-learning_rate = 3e-4
-device = 'cuda' if torch.cuda.is_available() else 'cpu'
-eval_iters = 200
-n_embd = 384
-n_head = 6
-n_layer = 6
-dropout = 0.2
+class config:
+    batch_size = 4 # how many independent sequences will we process in parallel?
+    block_size = 1024 # what is the maximum context length for predictions?
+    max_iters = 500
+    eval_interval = 50
+    learning_rate = 3e-4
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    eval_iters = 200
+    n_embd = 384
+    n_head = 6
+    n_layer = 6
+    dropout = 0.2
+    vocab_size = None
+
 # training data
-with open('../data/shakesphere.txt', 'r', encoding='utf-8') as f: # on branch master
+with open('data/shakesphere.txt', 'r', encoding='utf-8') as f: # on branch master
     text = f.read()
 
 # here are all the unique characters that occur in this text
 chars = sorted(list(set(text)))
-vocab_size = len(chars)
+config.vocab_size = len(chars)
 # create a mapping from characters to integers
 stoi = { ch:i for i,ch in enumerate(chars) }
 itos = { i:ch for i,ch in enumerate(chars) }
@@ -45,10 +54,10 @@ val_data = data[n:]
 def get_batch(split):
     # generate a small batch of data of inputs x and targets y
     data = train_data if split == 'train' else val_data
-    ix = torch.randint(len(data) - block_size, (batch_size,))
-    x = torch.stack([data[i:i+block_size] for i in ix])
-    y = torch.stack([data[i+1:i+block_size+1] for i in ix])
-    x, y = x.to(device), y.to(device)
+    ix = torch.randint(len(data) - config.block_size, (config.batch_size,))
+    x = torch.stack([data[i:i+config.block_size] for i in ix])
+    y = torch.stack([data[i+1:i+config.block_size+1] for i in ix])
+    x, y = x.to(config.device), y.to(config.device)
     return x, y
 
 max_lr = 3e-4
@@ -74,8 +83,8 @@ def estimate_loss():
     out = {}
     model.eval()
     for split in ['train', 'val']:
-        losses = torch.zeros(eval_iters)
-        for k in range(eval_iters):
+        losses = torch.zeros(config.eval_iters)
+        for k in range(config.eval_iters):
             X, Y = get_batch(split)
             logits, loss = model(X, Y)
             losses[k] = loss.item()
@@ -83,14 +92,14 @@ def estimate_loss():
     model.train()
     return out
 
-model = BasicLLM(vocab_size).to(device)
+model = LLM(config).to(config.device)
 
-optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
+optimizer = torch.optim.AdamW(model.parameters(), lr=config.learning_rate)
 
-for iter in range(max_iters):
+for iter in range(config.max_iters):
     t0 = time()
     # every once in a while evaluate the loss on train and val sets
-    # if iter % eval_interval == 0 or iter == max_iters - 1:
+    # if iter % eval_interval == 0 or iter == config.max_iters - 1:
     #     losses = estimate_loss()
     #     print(f"step {iter}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
 
@@ -110,4 +119,4 @@ for iter in range(max_iters):
     dt = 1000*(t1-t0)
     print(f"step: {iter} | train loss:{loss.item():.4f} | dt: {dt:.2f}ms")
 
-torch.save(model, '../train runs/basic_llm_model.pt')
+torch.save(model, 'train runs/basic_llm_model.pt')
