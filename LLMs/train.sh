@@ -1,9 +1,9 @@
 #!/bin/bash
 
 # Define default arguments
-BATCH_SIZE=4
+BATCH_SIZE=8
 BLOCK_SIZE=1024
-MAX_ITERS=5000
+MAX_ITERS=10000
 # EVAL_INTERVAL=100
 LEARNING_RATE=0.0003
 DEVICE="cuda"
@@ -15,12 +15,12 @@ DROPOUT=0.2
 VOCAB_SIZE=50304
 WARMUP_STEPS=100
 MAX_DECAY_STEPS=300
-TOTAL_BATCH_SIZE_STR="2**14"
+TOTAL_BATCH_SIZE_STR="2**13"
 COMPILE=true
 SAVE_MODEL=true
 
 # Run the training script with arguments
-python Single\ GPU/flash_train.py \
+python Single\ GPU/kv_cache_train.py \
   --batch_size $BATCH_SIZE \
   --block_size $BLOCK_SIZE \
   --max_iters $MAX_ITERS \
