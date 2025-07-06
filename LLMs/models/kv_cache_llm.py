@@ -35,8 +35,8 @@ class CausalSelfAttention(nn.Module):
 
         if kv_cache is not None:
             past_k, past_v = kv_cache
-            k = torch.cat((past_k, k), dim=2)
-            v = torch.cat((past_v, v))
+            k = torch.cat((past_k, k), dim=-2)
+            v = torch.cat((past_v, v), dim=-2)
 
         updated_kv_cache = (k, v)
 
@@ -185,15 +185,22 @@ class LLM(nn.Module):
         """
         kv_caches = None
         for _ in range(max_new_tokens):
+            # Determine the input for the forward pass
             if kv_caches is None:
-                # First pass, no cache exists yet
-                idx_cond = idx
+                # On the first pass, use the full provided idx, but cropped to block_size
+                idx_cond = idx if idx.size(1) <= self.block_size else idx[:, -self.block_size:]
             else:
-                # Subsequent passes, we have a cache, so only pass the last token
+                # On subsequent passes, only use the very last token
                 idx_cond = idx[:, -1:]
 
             logits, _, kv_caches = self(idx_cond, kv_caches=kv_caches)
-            
+            # --- After the forward pass, prune the cache if it's too long ---
+            if kv_caches[0][0].shape[-2] > self.block_size:
+                for i in range(len(kv_caches)):
+                    k, v = kv_caches[i]
+                    # Slice the sequence dimension (T) to be at most block_size
+                    kv_caches[i] = (k[..., -self.block_size:, :], v[..., -self.block_size:, :])
+
             logits = logits[:, -1, :] / temperature
             if top_k is not None:
                 v, _ = torch.topk(logits, min(top_k, logits.size(-1)))

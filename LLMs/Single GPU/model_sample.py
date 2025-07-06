@@ -17,8 +17,6 @@ from time import time
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 # Import the LLM model definition (assuming it's in models/flash_llm.py)
-from models.flash_llm import LLM
-
 class config:
     pass
 
@@ -59,8 +57,8 @@ def main():
 
     generated_text = enc.decode(generated_ids[0].tolist())
 
-    print(f'\nTime taken to generate = {dt:.2f}s')
-    print(f'\n--------------------------------------\n\n{generated_text}')
+    print(f'\n\n{generated_text}')
+    print(f'\n\n--------------------------------------\n\nTime taken to generate = {dt:.2f}s')
 
 if __name__ == '__main__':
     main()
