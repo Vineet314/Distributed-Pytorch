@@ -185,12 +185,21 @@ class LLM(nn.Module):
         """
         kv_caches = None
         for _ in range(max_new_tokens):
-            # Determine the input for the forward pass
-            if kv_caches is None:
-                # On the first pass, use the full provided idx, but cropped to block_size
+            # If the sequence context is growing too long, crop the KV cache
+            if kv_caches is not None and kv_caches[0][0].shape[-2] >= self.block_size:
+                for i in range(len(kv_caches)):
+                    # Chop the cache to the block size
+                    k, v = kv_caches[i]
+                    # Slice sequence dimension T
+                    kv_caches[i] = (k[..., -self.block_size+1:, :], v[..., -self.block_size+1:, :])
+                # Pass only the last token
+                idx_cond = idx[:, -1:]
+            
+            elif kv_caches is None:
+                # First pass, no cache exists yet, crop the input if it's too long
                 idx_cond = idx if idx.size(1) <= self.block_size else idx[:, -self.block_size:]
             else:
-                # On subsequent passes, only use the very last token
+                # Subsequent passes, we have a cache, so only pass the last token
                 idx_cond = idx[:, -1:]
 
             logits, _, kv_caches = self(idx_cond, kv_caches=kv_caches)
