@@ -2,16 +2,12 @@
 This code is highly inspired by Andrej Karpathy's work on his nanoGPT :
 https://github.com/karpathy/nanoGPT
 
-All the inefficiencies in the code basic_train.py have been handled.
-With torch.compile(), this code is a highly efficient implementation of an LLM on a single GPU. 
-Although, algorithmic rewrites can be implemented like the grouped query attention, MHLA, etc.
-
 This script is to be run from LLMs dir as : LLMs/single_gpu/mqa_gqa/train.sh
 '''
 
 import sys
 import os
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))) # to find the models dir
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 import tiktoken
 import argparse

@@ -1,6 +1,9 @@
 '''Improves upon the basic attention implementation by using F.scaled_dot_product_attention, 
 Which is the Flash Attention implementation in PyTorch. 
 Along with other efficienct improvements, this code runs much faster.
+
+This code is highly inspired by Andrej Karpathy's work on his nanoGPT :
+https://github.com/karpathy/nanoGPT
 '''
 import torch
 import torch.nn as nn

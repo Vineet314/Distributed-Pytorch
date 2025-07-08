@@ -1,7 +1,8 @@
-'''Improves upon the basic attention implementation by using F.scaled_dot_product_attention, 
-Which is the Flash Attention implementation in PyTorch. 
-Along with other efficienct improvements, this code runs much faster.
 '''
+The number of Key/Value heads can be duplicated while keeping Query heads unique, for efficiecy and lower memory, at the cost of quality. 
+This code is just one step behind implementation of the Multi Head Latent Attention, which is better than MHA or MQA/GQA in almost every aspect.
+'''
+
 import torch
 import torch.nn as nn
 from torch.nn import functional as F

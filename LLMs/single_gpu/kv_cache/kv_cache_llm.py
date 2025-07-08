@@ -1,6 +1,6 @@
-'''Improves upon the basic attention implementation by using F.scaled_dot_product_attention, 
-Which is the Flash Attention implementation in PyTorch. 
-Along with other efficienct improvements, this code runs much faster.
+'''
+Implements KV caching during inference, significantly boosting speed over previous version.
+Although, algorithmic rewrites can be implemented like the grouped query attention, MHLA, etc.
 '''
 import torch
 import torch.nn as nn
