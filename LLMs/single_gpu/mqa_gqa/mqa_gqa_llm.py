@@ -43,8 +43,8 @@ class CausalSelfAttention(nn.Module):
         kv_proj_size = self.n_kv_heads * head_size
         # q, k, v = self.c_attn(x).split(self.n_embd, dim=2) # this was for MHA
         q, k, v = self.c_attn(x).split([q_proj_size, kv_proj_size, kv_proj_size], dim=2)
-        k = k.view(B, T, self.n_head, head_size).transpose(1, 2) # (B, nh, T, hs)
-        q = q.view(B, T, self.n_kv_heads, head_size).transpose(1, 2) # (B, n_kvh, T, hs)
+        q = q.view(B, T, self.n_head,     head_size).transpose(1, 2) # (B, n_kvh, T, hs)
+        k = k.view(B, T, self.n_kv_heads, head_size).transpose(1, 2) # (B, nh, T, hs)
         v = v.view(B, T, self.n_kv_heads, head_size).transpose(1, 2) # (B, n_kvh, T, hs)
 
         if kv_cache is not None:
