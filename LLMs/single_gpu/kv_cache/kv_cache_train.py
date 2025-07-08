@@ -6,8 +6,7 @@ All the inefficiencies in the code basic_train.py have been handled.
 With torch.compile(), this code is a highly efficient implementation of an LLM on a single GPU. 
 Although, algorithmic rewrites can be implemented like the grouped query attention, MHLA, etc.
 
-This script is to be run from LLMs dir as :
-python "Single GPU/flash_train.py"
+This script is to be run from LLMs dir as : LLMs/single_gpu/kv_cache/train.sh
 '''
 
 import sys
