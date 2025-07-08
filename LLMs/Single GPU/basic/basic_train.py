@@ -15,7 +15,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))) 
 import torch
 import argparse
 
-from models.basic_llm import LLM
+from basic_llm import LLM
 from time import time
 
 # hyperparameters

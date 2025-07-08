@@ -22,7 +22,7 @@ import math
 from dataclasses import dataclass
 from time import time
 
-from models.flash_llm import LLM
+from flash_llm import LLM
 
 torch.set_float32_matmul_precision("high") # OPTIM 1 brought dt from 230 to 170
 
