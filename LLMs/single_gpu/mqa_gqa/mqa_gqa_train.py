@@ -168,8 +168,8 @@ def main(model:LLM, config:config, optimizer:torch.optim.Optimizer):
         print(f"step: {iter} | train loss:{loss_accum:.4f} | dt: {dt:.2f}ms | grad_acum_steps:{grad_accum_steps}")
 
     if config.save_model:
-        torch.save(model, 'kv_cache_llm_model.pt')
-        print("\nsaved run to kv_cache_llm_model.pt")
+        torch.save(model, 'mqa_gqa_llm_model.pt')
+        print("\nsaved run to mqa_gqa_llm_model.pt")
 
 if __name__ == '__main__':
     args = parse_args()
