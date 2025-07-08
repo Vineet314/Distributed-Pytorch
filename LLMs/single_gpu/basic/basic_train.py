@@ -37,7 +37,7 @@ class config:
     save_model = True
 
 # training data
-with open('data/shakesphere.txt', 'r', encoding='utf-8') as f: # on branch master
+with open('../../data/shakesphere.txt', 'r', encoding='utf-8') as f: # on branch master
     text = f.read()
 
 # here are all the unique characters that occur in this text

@@ -55,7 +55,7 @@ class DataLoader:
         self.T = T
         enc = tiktoken.get_encoding('gpt2')
         # training data
-        with open('data/shakesphere.txt', 'r', encoding='utf-8') as f:
+        with open('../../data/shakesphere.txt', 'r', encoding='utf-8') as f:
             text = f.read()
         tokens = enc.encode(text)
         self.tokens = torch.tensor(tokens)
