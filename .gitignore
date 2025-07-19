@@ -10,3 +10,4 @@ LLMs/train\ runs/
 CNNs/data/
 LLMs/__pycache__
 CNNs/__pycache__
+LLMs/8_rope_mhla/
