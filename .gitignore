@@ -8,5 +8,5 @@
 LLMs/data/
 LLMs/train\ runs/
 CNNs/data/
-LLMs/__pycache__
-CNNs/__pycache__
+__pycache__
+LLMs/advances/
