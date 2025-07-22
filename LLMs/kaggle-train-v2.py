@@ -20,11 +20,11 @@ Available settings to choose from :
 This script uses Pytorch's Distributed Data Parallel, meaning the model can be trained on multi-GPU systems.
 For instance, on kaggle, add this as a utility script, and run:
 
-!torchrun --standalone --nproc_per_node=2 /path/to/this/scripty.py --arg1=val1 --arg2=val2
+!torchrun --standalone --nproc_per_node=2 /path/to/this/scripty.py --type='mla' --pos_emb='rope' --max_iters=200
 
 For details about arguments, see the LLMConfig and TrainConfig classes.'''
 ### ----------- Model Script -----------
-
+import warnings; warnings.filterwarnings('ignore')
 import math
 import torch
 import torch.nn as nn
@@ -83,39 +83,44 @@ class GQA(nn.Module):
 
     def __init__(self, config:LLMconfig):
         super().__init__()
+        assert config.n_embd % config.n_head == 0, "n_embd must be divisible by n_head"
         if config.typ == 'mha' : config.n_kv_heads = config.n_head
         elif config.typ == 'mqa' : config.n_kv_heads = 1
         else : assert config.n_head % config.n_kv_heads == 0, "n_head must be divisible by n_kv_heads"
         
-        assert config.n_embd % config.n_head == 0, "n_embd must be divisible by n_head"
-        self.config = config
-        self.head_size = config.n_embd // config.n_head
+        self.n_kv_heads = config.n_kv_heads
+        self.n_head     = config.n_head
+        self.n_embd     = config.n_embd
+        self.config     = config 
+
+        head_size = self.n_embd // self.n_head
+        self.head_size = head_size
 
         # k,q,v in a btach
-        self.c_attn = nn.Linear(config.n_embd, config.n_embd + 2 * config.n_kv_heads * self.head_size)
+        # Total size for Q is n_embd. Total size for K and V is n_kv_heads * head_size each.
+        self.c_attn = nn.Linear(self.n_embd, self.n_embd + 2 * self.n_kv_heads * head_size)
         # output projection
         self.c_proj = nn.Linear(config.n_embd, config.n_embd)
         # regularization
-        self.attn_dropout  = nn.Dropout(config.dropout)
         self.resid_dropout = nn.Dropout(config.dropout)
 
-    def forward(self, x:torch.Tensor, freqs_cis:torch.Tensor|None, kv_cache=None):
+    def forward(self, x:torch.Tensor, freqs_cis, kv_cache=None):
         B, T, C = x.size()
-        nh, nkvh, hs = self.config.n_head , self.config.n_kv_heads, self.head_size
+        head_size = C // self.n_head
 
-        q_proj_size = C # n_embd
-        kv_proj_size = nkvh * hs
+        q_proj_size = self.n_embd
+        kv_proj_size = self.n_kv_heads * head_size
+        # q, k, v = self.c_attn(x).split(self.n_embd, dim=2) # this was for MHA
         q, k, v = self.c_attn(x).split([q_proj_size, kv_proj_size, kv_proj_size], dim=2)
-        q:torch.Tensor = q.view(B, T, nh, hs) # (B, T, nh, hs)
-        k:torch.Tensor = k.view(B, T, nkvh, hs) # (B, T, n_kvh, hs)
-        v:torch.Tensor = v.view(B, T, nkvh, hs).transpose(1, 2) # (B, n_kvh, T, hs)
+        q:torch.Tensor = q.view(B, T, self.n_head, head_size) # (B, T, nh, hs)
+        k:torch.Tensor = k.view(B, T, self.n_kv_heads, head_size) # (B, T, n_kvh, hs)
+        v:torch.Tensor = v.view(B, T, self.n_kv_heads, head_size).transpose(1, 2) # (B, n_kvh, T, hs)
 
         if self.config.pos_emb == 'rope':
-        # Apply RoPE
-            q = LLMconfig.apply_rotary_emb(q, freqs_cis) # (B, nh, T, hs)
-            k = LLMconfig.apply_rotary_emb(k, freqs_cis) # (B, n_kvh, T, hs)
+            q = LLMconfig.apply_rotary_emb(q, freqs_cis) 
+            k = LLMconfig.apply_rotary_emb(k, freqs_cis) 
 
-        q,k = q.transpose(1, 2), k.transpose(1, 2)
+        q = q.transpose(1,2) ; k = k.transpose(1,2) # (B, nh, T, hs) , (B, n_kvh, T, hs)
 
         if kv_cache is not None:
             past_k, past_v = kv_cache
@@ -124,12 +129,12 @@ class GQA(nn.Module):
 
         updated_kv_cache = (k, v)
 
-        if nkvh != nh:
-            num_repeats = nh // nkvh
+        if self.n_kv_heads != self.n_head:
+            num_repeats = self.n_head // self.n_kv_heads
             k = k.repeat_interleave(num_repeats, dim=1)
             v = v.repeat_interleave(num_repeats, dim=1)
 
-        y = F.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=self.dropout if self.training else 0, is_causal=True)
+        y = F.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=self.config.dropout if self.training else 0, is_causal=True)
         y = y.transpose(1,2).contiguous().view(B,T,C)
 
         # output projection
@@ -576,7 +581,7 @@ torch.manual_seed(1729)
 torch.cuda.manual_seed(1729)
 torch.set_float32_matmul_precision('high')   # Not sure if this has any effect when used with Auto Mixed Precision
 
-dtype = 'bfloat16' if torch.cuda.is_bf16_supported() else 'float16'
+dtype = 'float16'
 ctx = torch.amp.autocast(device_type="cuda", dtype=getattr(torch, dtype))
 scaler = torch.amp.GradScaler(enabled=(dtype == 'float16'))
 
@@ -593,8 +598,8 @@ class Trainconfig:
     learning_rate : float
     warmup_steps : int
     grad_clip : int
-    compile : bool #= False if os.name != 'posix' else True
     save_model : bool
+    matmul_precision : str|Literal['highest', 'high', 'medium']
 
 ModelConfig = LLMconfig(
     # token params
@@ -619,17 +624,17 @@ ModelConfig = LLMconfig(
 
 TrainingConfig = Trainconfig(
     
-    total_batch_size = 2**13,
-    batch_size = 2**3, # how many independent sequences will we process in parallel?
+    total_batch_size = 2**14,
+    batch_size = 2**3,
     max_iters = 2500,
     eval = False,
     eval_interval=100,
     eval_iters=100,
     learning_rate = 3e-4,
     warmup_steps = 100,
-    grad_clip = 1.0,    
-    compile = True,
-    save_model = True)
+    grad_clip = 1.0,
+    save_model = True,
+    matmul_precision = 'high')
 
 # ___________ CLI-OVERRIDE__________________
 
@@ -641,7 +646,8 @@ def parse_args():
     parser.add_argument('--eval_iters',    type=int,   default=TrainingConfig.eval_iters,    help='Number of iterations for evaluation')
     parser.add_argument('--learning_rate', type=float, default=TrainingConfig.learning_rate, help='Learning rate for training')
     parser.add_argument('--warmup_steps',  type=int,   default=TrainingConfig.warmup_steps,  help='Number of warmup steps for learning rate')
-    parser.add_argument('--grad_clip',     type=float,  default=TrainingConfig.grad_clip,    help='Gradient Clip value')
+    parser.add_argument('--grad_clip',     type=float, default=TrainingConfig.grad_clip,     help='Gradient Clip value')
+    parser.add_argument('--matmul_precision',type=str, default=TrainingConfig.matmul_precision, help='torch Matrix Multiply Precision [\'highest\', \'high\', \'medium\']')
 
     parser.add_argument('--vocab_size',  type=int,   default=ModelConfig.vocab_size,  help='Vocabulary size for the model')
     parser.add_argument('--block_size',  type=int,   default=ModelConfig.block_size,  help='Block size for the model')
@@ -658,8 +664,7 @@ def parse_args():
     parser.add_argument('--kv_latent_dim', type=int, default=ModelConfig.kv_latent_dim,help='KV latent dimension (only for mla)')
     parser.add_argument('--rope_head_dim', type=int, default=ModelConfig.rope_head_dim,help='RoPE head dimension (only for mla)')
     
-    parser.add_argument('--total_batch_size_str', type=str, default='2**14', help='Total batch size for training passed in as a string expression')
-    parser.add_argument('--compile',    action='store_true', help='Whether to compile the model with torch.compile()')
+    parser.add_argument('--total_batch_size_str', type=str, default='2**13', help='Total batch size for training passed in as a string expression')
     parser.add_argument('--eval',       action='store_true', help='Wheter to perform Evalutions once a while')
     parser.add_argument('--save_model', action='store_true', help='Whether to save the model after training')
 
@@ -723,7 +728,7 @@ class DataLoader:
 def get_lr(iter, TrainingConfig:Trainconfig):
     max_lr = TrainingConfig.learning_rate
     min_lr = max_lr*0.1
-    max_decay_steps = TrainingConfig.max_iters
+    max_decay_steps = TrainingConfig.max_iters+2
     # 1) linear warump for warmup_steps:
     if iter < TrainingConfig.warmup_steps:
         return max_lr * (iter+1)/TrainingConfig.warmup_steps
@@ -775,9 +780,8 @@ model = LLM(ModelConfig).to(device)
 if master_process : print(f"total parameters = {model.get_num_params():,}")
 model = DDP(model, device_ids=[ddp_local_rank])
 
-if TrainingConfig.compile :  
-    if master_process : print("Using compiled model")
-    model = torch.compile(model)
+if master_process : print("Using compiled model")
+model = torch.compile(model)
 
 raw_model:LLM = model.module
 
