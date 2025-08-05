@@ -1,8 +1,6 @@
 ## Pytorch Distributed Training
 
-This repository contains a collection of examples and utilities for distributed training using PyTorch. It includes various configurations and setups to help you get started with distributed training in different environments.
-
-Although the main focus is on distributed training of LLMs, some CNN models are also explored to be trained on multiple GPUs.
+This repository contains a collection of examples and utilities for distributed training of Language Models using PyTorch. It includes various configurations and setups to help you get started with distributed training in different environments.
 
 The goal is to understand how to set up distributed training in PyTorch, including distributed data parallelism (DDP) and Fully Sharded Data Parallel (FSDP).
 

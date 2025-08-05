@@ -1,12 +1,25 @@
-*ubyte* 
-*.pt
-*.pth
-*.ckpt
-*.pyc
+*__pycache__/
 *.pyo
 *.pyd
-LLMs/data/
-LLMs/train\ runs/
-CNNs/data/
-__pycache__
-LLMs/advances/
+*.pyc
+
+# ignore Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+# ignore virtual environments
+.env
+.venv
+env/
+venv/
+# ignore Pytorch models 
+*.pt
+*.pth
+# ignore logs
+*.log
+
+# ignore temp excel files
+*$*.xlsx
+
+*.txt
+*.bin
+*cache*/
+kaggle.py
