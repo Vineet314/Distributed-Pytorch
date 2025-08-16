@@ -759,6 +759,7 @@ import requests
 import numpy as np
 
 from time import perf_counter
+from contextlib import nullcontext
 
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
@@ -1073,13 +1074,11 @@ x,y = train_loader.next_batch()
 for iter in range(TrainingConfig.max_iters+1):
     t0 = perf_counter()
 
-    lr = get_lr(iter, TrainingConfig) 
+    lr = get_lr(iter, TrainingConfig)
     for param_grp in optimizer.param_groups:
         param_grp['lr'] = lr
     
     optimizer.zero_grad(set_to_none=True)
-
-    a,b = 0,0
     if TrainingConfig.eval and (iter % TrainingConfig.eval_interval == 0 or iter == TrainingConfig.max_iters) and iter!=0:
         a = perf_counter()
         losses = estimate_loss(model, TrainingConfig, train_loader, val_loader)
@@ -1089,14 +1088,17 @@ for iter in range(TrainingConfig.max_iters+1):
         t0 = b
     
     for micro_step in range(grad_accum_steps):
-        model.require_backward_grad_sync = (micro_step == grad_accum_steps - 1)
+        # only sync gradients on the very last step.
+        sync_context = model.no_sync() if micro_step < (grad_accum_steps-1) else nullcontext()
+        x, y = train_loader.next_batch()
 
-        with ctx:
-            _, loss, _ = model(x,y)
-            loss:torch.Tensor = loss/grad_accum_steps
+        with sync_context:
+            with ctx:
+                _, loss, _ = model(x, y)
+                loss = loss / grad_accum_steps
+            scaler.scale(loss).backward() # The backward pass must be inside the sync_context
 
-        x,y = x.to(device=device), y.to(device=device) # async pre-load next batch
-        scaler.scale(loss).backward()
+        x,y = train_loader.next_batch() # async pre-load the next batch while GPU does backward pass
 
     if TrainingConfig.grad_clip != 0.0:
         scaler.unscale_(optimizer)
@@ -1109,7 +1111,7 @@ for iter in range(TrainingConfig.max_iters+1):
         torch.cuda.synchronize()
         mem = torch.cuda.memory_reserved()
         dt  = (perf_counter()-t0)*1000
-        print(f"step: {iter} | train loss:{loss*grad_accum_steps:.4f} | dt: {dt:.2f}ms | grad_accum_steps: {grad_accum_steps} | GPU RAM: {mem/1024**3:.2f}GB")
+        print(f"step: {iter} | train loss:{loss.item()*grad_accum_steps:.4f} | dt: {dt:.2f}ms | grad_accum_steps: {grad_accum_steps} | GPU RAM: {mem/1024**3:.2f}GB")
 
 destroy_process_group()
 
