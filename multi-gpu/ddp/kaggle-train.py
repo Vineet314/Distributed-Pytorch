@@ -513,6 +513,7 @@ class Block(nn.Module):
     def __init__(self, config:LLMconfig):
         super().__init__()
         self.is_moe = config.moe
+        self.act_recomp = config.act_recomp
         self.attn = Attention(config)
         self.ln1  = nn.LayerNorm(config.n_embd)
         self.ln2  = nn.LayerNorm(config.n_embd)
@@ -522,10 +523,14 @@ class Block(nn.Module):
             self.mlp = MLP(config)
 
     def forward(self, x:torch.Tensor, freqs_cis:torch.Tensor|None = None, kv_cache=None, VAL_RUN=False):
-        # Layer Norm + Attention
-        attn_output, updated_kv_cache = self.attn.forward(self.ln1(x), freqs_cis, kv_cache, VAL_RUN)
+        if self.act_recomp:
+            attn_output, updated_kv_cache = checkpoint(self.attn, self.ln1(x), freqs_cis, kv_cache, VAL_RUN, use_reentrant=False)
+        else:
+            attn_output, updated_kv_cache = self.attn(self.ln1(x), freqs_cis, kv_cache, VAL_RUN)
+        
         x = x + attn_output
 
+        # NO checkpointing the MoE/MLP part -> memory grows O(T^2) for attn, O(T) for MoE, +scary looking error when we add MoE in checkpoint  
         if self.is_moe: 
             moe_output, aux_loss = self.moe(self.ln2(x))
             x = x + moe_output
@@ -534,6 +539,7 @@ class Block(nn.Module):
             x = x + self.mlp(self.ln2(x))
 
         return x, updated_kv_cache, aux_loss
+
 
 class LLM(nn.Module):
     """ A simple Large language model """
@@ -677,12 +683,7 @@ class LLM(nn.Module):
         updated_kv_caches = []
         total_aux_loss = 0.0
         for i, block in enumerate(self.transformer.h):
-            # The block now returns an auxiliary loss from the MoE layer
-            if not self.config.act_recomp: 
-                x, updated_kv_cache, aux_loss = block(x, freqs_cis, kv_caches[i], self.VAL_RUN)
-            else : 
-                x, updated_kv_cache, aux_loss = checkpoint(block, x, freqs_cis, kv_caches[i], self.VAL_RUN)
-
+            x, updated_kv_cache, aux_loss = block(x, freqs_cis, kv_caches[i], self.VAL_RUN)            
             updated_kv_caches.append(updated_kv_cache)
             total_aux_loss += aux_loss
 
@@ -759,7 +760,6 @@ import requests
 import numpy as np
 
 from time import perf_counter
-from contextlib import nullcontext
 
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
