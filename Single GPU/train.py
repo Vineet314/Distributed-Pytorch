@@ -5,41 +5,30 @@ import torch
 import argparse
 import numpy as np
 
+from pathlib import Path
 from typing import Literal
 from time import perf_counter
-from model import LLM, LLMconfig
 from dataclasses import dataclass
-from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.distributed import init_process_group, destroy_process_group
+from contextlib import nullcontext
 
-assert torch.cuda.is_available()
+from model import LLM
 
-# ______________DEVICE, DTYPE, DDP SETUP_________________
+# ______________DEVICE and DTYPE SETUP_________________
+torch.manual_seed(1729)
+torch.cuda.manual_seed(1729)
+torch.set_float32_matmul_precision('medium')   # Not sure if this has any effect when used with Auto Mixed Precision
 
-init_process_group(backend='nccl')
-ddp_rank = int(os.environ['RANK'])
-ddp_local_rank = int(os.environ['LOCAL_RANK'])
-ddp_world_size = int(os.environ['WORLD_SIZE'])
-device = f"cuda:{ddp_local_rank}"
-master_process = ddp_rank == 0
-if master_process : print(f"DDP_WORLD_SIZE = {ddp_world_size}")
-
-torch.cuda.set_device(device)
-torch.manual_seed(1729 + ddp_rank)         # offset the seed
-torch.cuda.manual_seed(1729 + ddp_rank)    # offset the seed
-torch.set_float32_matmul_precision('high') # Not sure if this has any effect when used with Auto Mixed Precision
-torch.backends.cuda.matmul.allow_tf32 = True # allow tf32 on matmul
-torch.backends.cudnn.allow_tf32 = True # allow tf32 on cudnn
-
-dtype = 'float16' # if not torch.cuda.is_bf16_supported else 'bfloat16'
-ctx = torch.amp.autocast(device_type="cuda", dtype=getattr(torch, dtype))
-scaler = torch.amp.GradScaler(enabled=(dtype == 'float16'))
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+device_type = 'cuda' if 'cuda' in device else 'cpu'
+dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16'
+ctx = torch.amp.autocast(device_type=device_type, dtype=getattr(torch, dtype))
+scaler = torch.amp.GradScaler(enabled=(dtype == 'float16')) if device == 'cuda' else nullcontext()
 
 # ____________PARAMS-CONFIG_________________
 
 @dataclass
 class Trainconfig:
-    dataset : str | Literal['shakespeare', 'tinystories']
+    dataset : str | Literal['shakespeare', 'tinystories', 'fineweb']
     total_batch_size : int
     batch_size : int
     max_iters : int
@@ -49,25 +38,81 @@ class Trainconfig:
     learning_rate : float
     warmup_steps : int
     grad_clip : int
+    compile : bool #= False if os.name != 'posix' else True
     save_model : bool
+    file_name : str
+    act_recomp : bool
+
+@dataclass
+class LLMconfig:
+    # token params
+    vocab_size : int
+    block_size : int
+    n_embd : int
+    pos_emb : str | Literal['learn','sin','rope']
+
+    # Neural Network
+    up_dim  : int
+    non_linearity : str | Literal['elu','lrelu','relu', 'gelu', 'glu', 'swiglu', 'swish', 'mish', 'silu', 'selu','celu','tanh','sigmoid']
+    dropout : float
+    n_layer : int
+
+    # MoE
+    moe : bool
+
+    n_exp : int
+    n_shared : int  
+    n_act : int      ### INCLUDES THE SHARED EXPERTS
+    coeff : float
+
+    aux_free : bool
+    alpha : float   # complementry aux loss coeff
+    gamma: float    # bias update speed
+    
+    # Attention
+    attn : str | Literal['mha', 'mqa', 'gqa', 'mla']
+    n_head : int
+    n_kv_heads : int 
+        # Only for mla 
+    q_latent_dim  : int | None
+    kv_latent_dim : int | None
+    rope_head_dim : int | None
+
+    act_recomp : bool
+
+TrainingConfig = Trainconfig(
+    dataset='tinystories',
+    total_batch_size = 2**11,
+    batch_size = 2**1, # how many independent sequences will we process in parallel?
+    max_iters = 2500,
+    eval = False,
+    eval_interval=100,
+    eval_iters=100,
+    learning_rate = 3e-4,
+    warmup_steps = 100,
+    grad_clip = 1.0,    
+    compile = False if os.name != 'posix' else True,
+    save_model = True,
+    file_name='llm_model',
+    act_recomp=False)   # Default to False
 
 ModelConfig = LLMconfig(
     # token params
     vocab_size = 50304, 
     block_size = 2**10,
-    n_embd = 768, 
+    n_embd = 256, 
     pos_emb = 'rope',
     
     # MoE
     moe = True,
 
-    up_dim = 512, 
-    non_linearity = 'gelu',  
-    dropout=0.15,
-    n_layer = 9,
+    up_dim = 384, 
+    non_linearity = 'swiglu',  
+    dropout=0.0,
+    n_layer = 6,
 
-    n_exp = 32,
-    n_shared = 1,
+    n_exp = 16,
+    n_shared = 2,
     n_act = 8,        ### INCLUDES THE SHARED EXPERTS
 
     coeff=0.01,
@@ -80,29 +125,18 @@ ModelConfig = LLMconfig(
     n_head = 8,
     n_kv_heads=4,
     # MHLA
-    q_latent_dim = 256, 
-    kv_latent_dim = 256,
-    rope_head_dim = 256)              
-
-TrainingConfig = Trainconfig(
-    dataset='tinystories',
-    total_batch_size = 2**12,
-    batch_size = 2**2, # how many independent sequences will we process in parallel?
-    max_iters = 2500,
-    eval = True,
-    eval_interval=100,
-    eval_iters=100,
-    learning_rate = 3e-4,
-    warmup_steps = 100,
-    grad_clip = 1.0,    
-    save_model = False)
+    q_latent_dim = 32, 
+    kv_latent_dim = 32,
+    rope_head_dim = 16,
+    
+    act_recomp=TrainingConfig.act_recomp)    # Link the activation recomputation from the TRaining params           
 
 # ___________ CLI-OVERRIDE__________________
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Train a simple LLM model')
     # Training Parameters
-    parser.add_argument('--dataset',       type=str,   default=TrainingConfig.dataset,       help='Dataset to use for training (shakespeare or tinystories)')
+    parser.add_argument('--dataset',       type=str,   default=TrainingConfig.dataset,       help='The data set to be used for training')
     parser.add_argument('--batch_size',    type=int,   default=TrainingConfig.batch_size,    help='Batch size for training')
     parser.add_argument('--max_iters',     type=int,   default=TrainingConfig.max_iters,     help='Maximum number of iterations for training')
     parser.add_argument('--eval_interval', type=int,   default=TrainingConfig.eval_interval, help='Interval for evaluation')
@@ -110,6 +144,8 @@ def parse_args():
     parser.add_argument('--learning_rate', type=float, default=TrainingConfig.learning_rate, help='Learning rate for training')
     parser.add_argument('--warmup_steps',  type=int,   default=TrainingConfig.warmup_steps,  help='Number of warmup steps for learning rate')
     parser.add_argument('--grad_clip',     type=float,  default=TrainingConfig.grad_clip,    help='Gradient Clip value')
+    parser.add_argument('--act_recomp', action='store_true', help='Whether to use (selective) activation recomputation')
+    
     # Model Parameters
     parser.add_argument('--vocab_size',  type=int,   default=ModelConfig.vocab_size,  help='Vocabulary size for the model')
     parser.add_argument('--block_size',  type=int,   default=ModelConfig.block_size,  help='Block size for the model')
@@ -136,11 +172,11 @@ def parse_args():
     parser.add_argument('--rope_head_dim', type=int, default=ModelConfig.rope_head_dim,help='RoPE head dimension (only for mla)')
     
     parser.add_argument('--total_batch_size_str', type=str, default=str(TrainingConfig.total_batch_size), help='Total batch size for training passed in as a string expression')
-    
     parser.add_argument('--moe',        action='store_true', help='Whether to use Mixture of Experts in the model')
     parser.add_argument('--aux_free',   action='store_true', help='Whether to use Aux Loss Free MoE')
     parser.add_argument('--eval',       action='store_true', help='Wheter to perform Evalutions once a while')
     parser.add_argument('--save_model', action='store_true', help='Whether to save the model after training')
+    parser.add_argument('--file_name', type=str, default=TrainingConfig.file_name, help='Name of the checkpoint to be saved')
 
     return parser.parse_args()
 
@@ -150,6 +186,8 @@ for key, value in vars(args).items():
     if key == 'total_batch_size_str':
         value = eval(value)
         setattr(TrainingConfig, 'total_batch_size', value)
+    elif key == 'act_recomp':
+        setattr(ModelConfig, key, value)
     else:
         if isinstance(value, str) and key !='non_linearity':
             value = value.lower().strip()
@@ -169,32 +207,54 @@ elif ModelConfig.attn == 'mla':
 
 # _______________ DATASET _________________
 
-# Using The Tiny Shakespeare dataset for demo
 class DataLoader:
     def __init__(self, B, T, file_path, device):
-        self.B = B ; self.T = T
+        self.B = B
+        self.T = T
         self.file_path = file_path
         self.device = device
+        self.device_type = 'cuda' if 'cuda' in device else 'cpu'
+
+        # Keep the memory-mapped file open persistently
+        self.tokens = np.memmap(self.file_path, dtype=np.uint16, mode='r')
+        self.N = len(self.tokens)
+        if self.B * self.T + 1 > self.N:
+            raise ValueError(f"Batch size {B} and block size {T} are too large for dataset of length {self.N}")
 
     def next_batch(self):
-        '''Credits to Andrej Karpathy's NanoGPT'''
+        """
+        Returns (x, y) where:
+        - x is (B, T) input tokens
+        - y is (B, T) target tokens (shifted by one)
+        """
         B, T = self.B, self.T
-        tokens = np.memmap(self.file_path, dtype=np.uint16, mode='r')
-        # seed offset ensures diff data across GPUs
-        start_ix = torch.randint(len(tokens) - (B * T + 1), (1,)).item()
-        # Slice the memory-mapped array. This is where the OS reads from disk.
-        buf = tokens[start_ix : start_ix + B * T + 1]
-        # .astype(np.int64) is important as torch.LongTensor is 64-bit
-        full_tokens = torch.from_numpy(buf.astype(np.int64))
 
-        x = full_tokens[:-1].view(B, T)
-        y = full_tokens[1:].view(B, T)
-        
-        # Pin memory which allows us to move them to GPU asynchronously (non_blocking=True)
-        x, y = x.pin_memory().to(self.device, non_blocking=True), y.pin_memory().to(self.device, non_blocking=True)
-        return x,y
+        # Sample B random starting positions independently
+        start_indices = torch.randint(0, self.N - T - 1, (B,))
 
-data_dir = os.path.join('..','data', TrainingConfig.dataset)
+        # Gather sequences
+        x_list = []
+        y_list = []
+        for start in start_indices:
+            seq = self.tokens[start : start + T + 1].astype(np.int64)
+            x_list.append(seq[:-1])
+            y_list.append(seq[1:])
+
+        # Stack into tensors
+        x = torch.tensor(np.stack(x_list), dtype=torch.long)
+        y = torch.tensor(np.stack(y_list), dtype=torch.long)
+
+        # Move to device (with pinned memory if CUDA)
+        if self.device_type == 'cuda':
+            x = x.pin_memory().to(self.device, non_blocking=True)
+            y = y.pin_memory().to(self.device, non_blocking=True)
+        else:
+            x = x.to(self.device)
+            y = y.to(self.device)
+        return x, y
+
+data_dir = os.path.join('data', TrainingConfig.dataset)
+print(f"Using Dataset {Path(data_dir).stem}")
 train_loader = DataLoader(B=TrainingConfig.batch_size, T=ModelConfig.block_size, file_path=os.path.join(data_dir, "train.bin"), device=device)
 val_loader = DataLoader(B=TrainingConfig.batch_size, T=ModelConfig.block_size, file_path=os.path.join(data_dir, "val.bin"), device=device)
 
@@ -216,11 +276,11 @@ def get_lr(iter, TrainingConfig:Trainconfig):
         decay_ratio = min(decay_ratio, 1.0)  # ensure it does
         coeff = 0.5 * (1 + math.cos(math.pi * decay_ratio))
         return min_lr + coeff * (max_lr - min_lr)
-    
+
 @torch.no_grad()
 def estimate_loss(model:LLM, TrainingConfig:Trainconfig, train_loader:DataLoader, val_loader:DataLoader):
     out = {}
-    model.eval()
+    model.eval() ; model.VAL_RUN = True
     for split, loader in [('train', train_loader), ('val', val_loader)]:
         losses = torch.zeros(TrainingConfig.eval_iters)
         for k in range(TrainingConfig.eval_iters):
@@ -229,7 +289,7 @@ def estimate_loss(model:LLM, TrainingConfig:Trainconfig, train_loader:DataLoader
                 _, loss, _ = model(X, Y)
             losses[k] = loss.item()
         out[split] = losses.mean()
-    model.train()
+    model.train(); model.VAL_RUN = False
     return out
 
 #___________GRAD_ACCUM SETUP_____________
@@ -237,27 +297,26 @@ def estimate_loss(model:LLM, TrainingConfig:Trainconfig, train_loader:DataLoader
 total_batch_size = TrainingConfig.total_batch_size
 B = TrainingConfig.batch_size    # microbatch size
 T = ModelConfig.block_size       # sequence length
-assert total_batch_size % (B * T *ddp_world_size) == 0, "make sure total_batch_size is divisible by B * T * ddp_world_size"
-grad_accum_steps = total_batch_size // (B * T *ddp_world_size)
+assert total_batch_size % (B * T) == 0, "make sure total_batch_size is divisible by B * T"
+grad_accum_steps = total_batch_size // (B * T)
 
 #___________CREATE YOUR MODEL_____________
 model = LLM(ModelConfig).to(device)
-if master_process : 
-    total, active = model.get_num_params()
-    print(f"total parameters = {total:,}, acitive parameters = {active:,}")
+total, active = model.get_num_params()
+print(f"total parameters = {total:,}, acitive parameters = {active:,}")
 
-model = DDP(model, device_ids=[ddp_local_rank], find_unused_parameters=ModelConfig.moe)
-
-if master_process : print("Using compiled model")
-model = torch.compile(model)
-
-raw_model:LLM = model.module
+if TrainingConfig.compile :  
+    print("Using compiled model")
+    model = torch.compile(model)
 
 #______________________________________________ TRAINING ______________________________________________
 
-optimizer = raw_model.configure_optimizers(weight_decay=0.1,learning_rate=TrainingConfig.learning_rate,device=device)
+optimizer = model.configure_optimizers(weight_decay=0.1,learning_rate=TrainingConfig.learning_rate,device=device)
+
 x,y = train_loader.next_batch() # get the first batch of training data
-loss_stats = []
+train_loss_stats = []
+valrun_val_loss_stats = []
+valrun_train_loss_stats = []
 for iter in range(TrainingConfig.max_iters+1):
     t0 = perf_counter()
 
@@ -266,21 +325,23 @@ for iter in range(TrainingConfig.max_iters+1):
         param_grp['lr'] = lr
     
     optimizer.zero_grad(set_to_none=True)
-
+    a,b = 0,0
     if TrainingConfig.eval and (iter % TrainingConfig.eval_interval == 0 or iter == TrainingConfig.max_iters) and iter!=0:
+        a = perf_counter()
         losses = estimate_loss(model, TrainingConfig, train_loader, val_loader)
-        if master_process:
-            print(f"-----val run------- train loss {losses['train']:.4f}, val loss {losses['val']:.4f} --------------")
-
+        valrun_val_loss_stats.append(losses['val'])
+        valrun_train_loss_stats.append(losses['train'])
+        b = perf_counter()
+        print(f"--------val run-------- train loss {losses['train']:.4f} | val loss {losses['val']:.4f} | dt {1000*(b-a):.4f}ms")
+        t0 = b
+    
     for micro_step in range(grad_accum_steps):
-        model.require_backward_grad_sync = (micro_step == grad_accum_steps - 1)
-
         with ctx:
-            _, loss, _ = model(x,y)
+            _, loss, _ = model(x,y) #logits, loss, kv cache
             loss:torch.Tensor = loss/grad_accum_steps
 
         x,y = train_loader.next_batch() # Async prefetch the next batch of data
-        loss_stats.append(loss.cpu())
+        train_loss_stats.append(loss.item())
         scaler.scale(loss).backward()
 
     if TrainingConfig.grad_clip != 0.0:
@@ -289,15 +350,23 @@ for iter in range(TrainingConfig.max_iters+1):
 
     scaler.step(optimizer)
     scaler.update()    
-
-    if master_process:
+    mem = 0
+    if "cuda" in device : 
         torch.cuda.synchronize()
-        dt  = (perf_counter()-t0)*1000
-        print(f"step: {iter} | train loss:{loss*grad_accum_steps:.4f} | dt: {dt:.2f}ms")
+        mem = torch.cuda.memory_reserved()
+    
+    dt  = (perf_counter()-t0)*1000
+    print(f"step: {iter} | train loss:{loss*grad_accum_steps:.4f} | dt: {dt:.2f}ms | grad_accum_steps: {grad_accum_steps} | GPU RAM: {mem/1024**3:.2f}GB")
 
-destroy_process_group()
+if TrainingConfig.save_model:
+    # might do in-training checkpointing later
+    loss_stats = {'train':train_loss_stats, 'valrun_val':valrun_val_loss_stats, 'valrun_train':valrun_train_loss_stats}
 
-if TrainingConfig.save_model and master_process:
-    checkpoint = {'config': ModelConfig, 'model_state': raw_model.state_dict(), 'iter_num':iter, 'last_loss':losses, 'train_losses':loss_stats} 
-    torch.save(checkpoint, 'llm_model.pt')
-    print("checkpoint saved to llm_model.pt")
+    checkpoint = {'model_config':ModelConfig, 'train_config':TrainingConfig, 'model_state': model.state_dict()}
+    stats      = {'model_config':ModelConfig, 'train_config':TrainingConfig, 'losses':loss_stats, 'total_params':total, 'active_params':active}
+
+    torch.save(checkpoint, TrainingConfig.file_name+'_ckpt.pt')
+    torch.save(stats, TrainingConfig.file_name+'_stats.pt')
+
+    print("Model and config saved to {}.pt".format(TrainingConfig.file_name + '_ckpt'))
+    print("Stats and config saved to {}.pt".format(TrainingConfig.file_name + '_stats'))

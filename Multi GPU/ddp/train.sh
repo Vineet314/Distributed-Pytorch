@@ -3,37 +3,38 @@
 # This script runs the train.py Python script with specified command-line arguments.
 
 # --- Training Configuration Arguments ---
-N_GPUS=1 # For now lets assume we have single node with multiple GPUs 
-
-DATASET='tinystories'
-TOTAL_BATCH_SIZE_STR="2**13"
-BATCH_SIZE=4 #2**2
-MAX_ITERS=3000
-LEARNING_RATE=3e-4
-WARMUP_STEPS=100
-GRAD_CLIP=1.0
+N_GPUS=4 # For now lets assume we have single node with multiple GPUs 
+DATASET='fineweb'    # Has 10B tokens
+TOTAL_BATCH_SIZE_STR="2**14" # Makes 4 grad_acccum_steps 
+BATCH_SIZE=2
+MAX_ITERS=150000   # Tokens covered = tokens/step * num_steps = 32768 * 150,000 = 4.8B < 10B
+LEARNING_RATE=7e-5  # to avoid overflow
+WARMUP_STEPS=500
+GRAD_CLIP=0.9
 EVAL=true
-EVAL_INTERVAL=250
-EVAL_ITERS=30
-SAVE_MODEL=false 
+EVAL_INTERVAL=100
+EVAL_ITERS=10
+SAVE_MODEL=true
+FILE_NAME="llm_model"
+ACT_RECOMP=true
 
 # --- Model Configuration Arguments ---
 N_LAYER=12
-N_EMBD=768
+N_EMBD=1024       # may increase this for convering more tokens, saving some memory with activation recomputation
 VOCAB_SIZE=50304
-BLOCK_SIZE=1024
-DROPOUT=0.1
+BLOCK_SIZE=1024   # total tokens per training step = seq_len * batch * grad_accum_steps * n_gpus = 1024*2*4*4 = 32768 
+DROPOUT=0.01
 POS_EMB="rope" # Can be 'learn', 'sin', 'rope'
 
-UP_DIM=512
-NON_LINEARITY="gelu" # Example: 'relu', 'gelu', 'silu'
+UP_DIM=768
+NON_LINEARITY="swiglu" # Example: 'relu', 'gelu', 'silu'
 
 ATTN="mla" # Can be 'mha', 'mqa', 'gqa', 'mla'
-N_HEAD=12
+N_HEAD=8
 N_KV_HEADS=4 # Only relevant if ATTN is 'gqa'
-Q_LATENT_DIM=96 # Only relevant if ATTN is 'mla'
-KV_LATENT_DIM=96 # Only relevant if ATTN is 'mla'
-ROPE_HEAD_DIM=48 # Only relevant if POS_EMB is 'rope'
+Q_LATENT_DIM=256 # Only relevant if ATTN is 'mla'
+KV_LATENT_DIM=256 # Only relevant if ATTN is 'mla'
+ROPE_HEAD_DIM=128 # Only relevant if POS_EMB is 'rope'
 
 MOE=true
 N_EXP=16
@@ -76,7 +77,9 @@ torchrun --standalone --nproc_per_node=$N_GPUS \
     --alpha $ALPHA \
     --gamma $GAMMA \
     --coeff $CEOFF \
+    --file_name $FILE_NAME \
     $( [ "$SAVE_MODEL" = true ] && echo "--save_model" ) \
     $( [ "$EVAL" = true ] && echo "--eval" ) \
     $( [ "$MOE" = true ] && echo "--moe" ) \
-    $( [ "$AUX_FREE" = true ] && echo "--aux_free" ) 
+    $( [ "$ACT_RECOMP" = true ] && echo "--act_recomp" ) \
+    $( [ "$AUX_FREE" = true ] && echo "--aux_free" )

@@ -30,6 +30,7 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
 
 from typing import Literal
 from dataclasses import dataclass 
@@ -69,6 +70,8 @@ class LLMconfig:
     q_latent_dim  : int | None
     kv_latent_dim : int | None
     rope_head_dim : int | None
+
+    act_recomp : bool  # more of a training param, but the best way to integrate that is to just add it here
 
     @staticmethod
     def apply_rotary_emb(x:torch.Tensor, freqs_cis:torch.Tensor)->torch.Tensor:
@@ -112,7 +115,7 @@ class GQA(nn.Module):
         self.attn_dropout  = nn.Dropout(config.dropout)
         self.resid_dropout = nn.Dropout(config.dropout)
 
-    def forward(self, x:torch.Tensor, freqs_cis:torch.Tensor|None, kv_cache=None):
+    def forward(self, x:torch.Tensor, freqs_cis:torch.Tensor|None, kv_cache=None, VAL_RUN=False):
         B, T, C = x.size()
         nh, nkvh, hs = self.config.n_head , self.config.n_kv_heads, self.head_size
 
@@ -182,13 +185,13 @@ class NaiveMHLA(nn.Module):
             self._k_absorbed_inference = (self.W_dq.weight.T @ self.W_uq.weight.T  @ self.W_uk.weight).view(nh, hs, n_kvl).unsqueeze(0)
             self._v_absorbed_inference = (self.W_uv.weight.T @ self.W_o.weight.T).view(n_kvl, nh, hs).transpose(0,1).unsqueeze(0)    
 
-    def forward(self, x:torch.Tensor, freqs_cis:torch.Tensor|None, kv_cache=None) -> tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, x:torch.Tensor, freqs_cis:torch.Tensor|None, kv_cache=None, VAL_RUN=False) -> tuple[torch.Tensor, torch.Tensor]:
 
         B, T, C = x.size()
         nh, n_kvl, hs = self.config.n_head, self.config.kv_latent_dim, self.config.n_embd//self.config.n_head
 
         # k_eff and v_eff based on training or inference
-        if self.training:
+        if self.training or VAL_RUN: # HIDDEN IN PLAIN SIGHT : THIS BUG TOOK ~16 HRS TO DEBUG
             k_eff = (self.W_dq.weight.T @ self.W_uq.weight.T  @ self.W_uk.weight).view(nh, hs, n_kvl).unsqueeze(0)
             v_eff = (self.W_uv.weight.T @ self.W_o.weight.T).view(n_kvl, nh, hs).transpose(0,1).unsqueeze(0)
         else:
@@ -213,10 +216,13 @@ class NaiveMHLA(nn.Module):
 
         attn:torch.Tensor = (q @ k_eff @ c_kv.transpose(1,2).unsqueeze(1)) / math.sqrt(hs)
 
-        query_indices = torch.arange(T, device=x.device).unsqueeze(1) + (T_full - T)
-        key_indices   = torch.arange(T_full, device=x.device).unsqueeze(0)
-        mask = (query_indices >= key_indices).unsqueeze(0).unsqueeze(0) # (1,1,T,T_full)
-        attn = attn.masked_fill(mask == 0, float('-inf'))
+        # query_indices = torch.arange(T, device=x.device).unsqueeze(1) + (T_full - T)
+        # key_indices   = torch.arange(T_full, device=x.device).unsqueeze(0)
+        # mask = (query_indices >= key_indices).unsqueeze(0).unsqueeze(0) # (1,1,T,T_full)
+        # attn = attn.masked_fill(mask == 0, float('-inf'))
+        
+        mask = torch.triu(torch.ones(T, T_full, device=x.device, dtype=torch.bool), diagonal=T_full - T + 1)
+        attn = attn.masked_fill(mask.unsqueeze(0).unsqueeze(0), float('-inf'))
         
         attn = self.dropout(F.softmax(attn, dim=-1)) # (B, nh, T, T_full)
 
@@ -269,7 +275,7 @@ class FullMHLA(nn.Module):
             self._k_absorbed_inference = (self.W_uq.weight.view(1,nlq,nh,hs).transpose(1,2) @ self.W_uk.weight.view(1,nh,hs,nlkv))
             self._v_absorbed_inference = (self.W_uv.weight.T @ self.W_o.weight.T).view(nlkv, nh, hs).transpose(0,1).unsqueeze(0)    
 
-    def forward(self, x:torch.Tensor, freqs_cis:torch.Tensor|None, kv_cache=None):
+    def forward(self, x:torch.Tensor, freqs_cis:torch.Tensor|None, kv_cache=None, VAL_RUN=False):
         B,T,C = x.size()
         nh,nlkv,nlq = self.config.n_head, self.config.kv_latent_dim, self.config.q_latent_dim
         hs = C//nh
@@ -280,7 +286,7 @@ class FullMHLA(nn.Module):
  #------------ NoPE--------------
 
         # Define the absorbed matrices
-        if self.training:
+        if self.training or VAL_RUN:  # HIDDEN IN PLAIN SIGHT : THIS BUG TOOK ~16 HRS TO DEBUG
             k_eff = (self.W_uq.weight.view(1,nlq,nh,hs).transpose(1,2) @ self.W_uk.weight.view(1,nh,hs,nlkv))
             v_eff = (self.W_uv.weight.T @ self.W_o.weight.T).view(nlkv, nh, hs).transpose(0,1).unsqueeze(0)  
         else:
@@ -318,10 +324,13 @@ class FullMHLA(nn.Module):
 
         attn = (attn_c + attn_r)/math.sqrt(hs+dhr)
 
-        query_indices = torch.arange(T, device=x.device).unsqueeze(1) + (T_full - T)
-        key_indices = torch.arange(T_full, device=x.device).unsqueeze(0)
-        mask = (query_indices >= key_indices).unsqueeze(0).unsqueeze(0) # (1,1,T,T_full)
-        attn = attn.masked_fill(mask == 0, float('-inf')) 
+        # query_indices = torch.arange(T, device=x.device).unsqueeze(1) + (T_full - T)
+        # key_indices = torch.arange(T_full, device=x.device).unsqueeze(0)
+        # mask = (query_indices >= key_indices).unsqueeze(0).unsqueeze(0) # (1,1,T,T_full)
+        # attn = attn.masked_fill(mask == 0, float('-inf')) 
+
+        mask = torch.triu(torch.ones(T, T_full, device=x.device, dtype=torch.bool), diagonal=T_full - T + 1)
+        attn = attn.masked_fill(mask.unsqueeze(0).unsqueeze(0), float('-inf'))
 
         attn = self.dropout(F.softmax(attn, dim=-1)) # (B, nh, T, T_full)
 
@@ -349,26 +358,40 @@ class Attention(nn.Module):
             else:
                 self.attn = FullMHLA(config)
                 
-    def forward(self, x:torch.Tensor, freqs_cis:torch.Tensor|None = None, kv_cache=None):
-        return self.attn(x, freqs_cis, kv_cache)
+    def forward(self, x:torch.Tensor, freqs_cis:torch.Tensor|None = None, kv_cache=None, VAL_RUN=False):
+        return self.attn(x, freqs_cis, kv_cache, VAL_RUN)
 
 class MLP(nn.Module):
     """ A simple feed-forward network block. """
     def __init__(self, config: LLMconfig):
         super().__init__()
-        non_linearity_map = {
-            'relu': nn.ReLU(), 'gelu': nn.GELU(), 'swish': nn.SiLU(), 'mish': nn.Mish(),
-            'silu': nn.SiLU(), 'selu': nn.SELU(), 'celu': nn.CELU(), 'elu': nn.ELU(),
-            'lrelu': nn.LeakyReLU(negative_slope=0.01), 'tanh': nn.Tanh(), 'sigmoid': nn.Sigmoid()}
-
-        self.c_fc = nn.Linear(config.n_embd, config.up_dim, bias=False)
-        self.non_linearity = non_linearity_map.get(config.non_linearity, nn.GELU())
-        self.c_proj = nn.Linear(config.up_dim, config.n_embd, bias=False)
-        self.dropout = nn.Dropout(config.dropout)
+        self.non_linearity = config.non_linearity.lower()
         
+        if self.non_linearity == 'swiglu':
+            # One projection, then split into two halves
+            self.c_fc = nn.Linear(config.n_embd, 2 * config.up_dim, bias=False)
+            self.c_proj = nn.Linear(config.up_dim, config.n_embd, bias=False)
+        else:
+            non_linearity_map = {
+                'relu': nn.ReLU(), 'gelu': nn.GELU(), 'swish': nn.SiLU(), 'mish': nn.Mish(),
+                'silu': nn.SiLU(), 'selu': nn.SELU(), 'celu': nn.CELU(), 'elu': nn.ELU(),
+                'glu' : nn.GLU(), 'sigmoid': nn.Sigmoid(),
+                'lrelu': nn.LeakyReLU(negative_slope=0.01), 'tanh': nn.Tanh()
+            }
+            self.c_fc = nn.Linear(config.n_embd, config.up_dim, bias=False)
+            self.non_linearity_func = non_linearity_map.get(self.non_linearity, nn.GELU())
+            self.c_proj = nn.Linear(config.up_dim, config.n_embd, bias=False)
+
+        self.dropout = nn.Dropout(config.dropout)
+
     def forward(self, x):
-        x = self.c_fc(x)
-        x = self.non_linearity(x)
+        if self.non_linearity == 'swiglu':
+            x1, x2 = self.c_fc(x).chunk(2, dim=-1)
+            x = F.silu(x1) * x2
+        else:
+            x = self.c_fc(x)
+            x = self.non_linearity_func(x)
+        
         x = self.c_proj(x)
         x = self.dropout(x)
         return x
@@ -434,29 +457,19 @@ class MoE(nn.Module):
             topk_gates = F.softmax(topk_original_logits, dim=1)
 
             # Calculate expert load and update bias during training only
+            with torch.no_grad():
+                ones = torch.ones_like(topk_indices, dtype=x_flat.dtype)
+                fi_counts = torch.zeros(self.n_routed, device=x.device).scatter_add_(0, topk_indices.flatten(), ones.flatten())
+                fi = fi_counts / n_tokens
+
             if self.training:
-                with torch.no_grad(): # Ensure this logic doesn't affect gradients
-                    ones = torch.ones_like(topk_indices, dtype=x_flat.dtype)
-                    fi_counts = torch.zeros(self.n_routed, device=x.device).scatter_add_(0, topk_indices.flatten(), ones.flatten())
-                    fi = fi_counts / n_tokens
+                with torch.no_grad():
                     ideal_load = 1.0 / self.n_routed
+                    delta = ideal_load - fi 
+                    self.expert_bias += (self.config.gamma*delta)
 
-                    overloaded_mask = fi > ideal_load
-                    underloaded_mask = fi < ideal_load
-
-                    self.expert_bias[overloaded_mask] -= self.config.gamma
-                    self.expert_bias[underloaded_mask] += self.config.gamma
-            
-            # COMPLEMENTARY LOSS
             router_probs = F.softmax(router_logits, dim=1)
             pi = router_probs.mean(dim=0)
-            # We need fi for the loss, but only want to calculate it once.
-            # During inference, we can skip the calculation if not already done.
-            if not self.training:
-                ones = torch.ones_like(topk_indices, dtype=torch.float)
-                fi_counts = torch.zeros(self.n_routed, device=x.device).scatter_add_(0, topk_indices.flatten(), ones.flatten())
-            fi = fi_counts / n_tokens
-            # complementary_loss
             aux_loss = self.config.alpha * self.n_routed * torch.sum(pi*fi)
 
         else:
@@ -504,9 +517,9 @@ class Block(nn.Module):
         else:
             self.mlp = MLP(config)
 
-    def forward(self, x:torch.Tensor, freqs_cis:torch.Tensor|None = None, kv_cache=None):
+    def forward(self, x:torch.Tensor, freqs_cis:torch.Tensor|None = None, kv_cache=None, VAL_RUN=False):
         # Layer Norm + Attention
-        attn_output, updated_kv_cache = self.attn.forward(self.ln1(x), freqs_cis, kv_cache)
+        attn_output, updated_kv_cache = self.attn.forward(self.ln1(x), freqs_cis, kv_cache, VAL_RUN)
         x = x + attn_output
 
         if self.is_moe: 
@@ -545,6 +558,10 @@ class LLM(nn.Module):
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         self.tkn_emb.weight = self.lm_head.weight # weight tying
         self.apply(self._init_weights)
+
+        self.VAL_RUN=False
+        self.print_act_recomp=config.act_recomp
+        self.print_fused_adamw=False 
 
     def _precompute_freqs_cis(self):
         """Precomputes the rotary frequencies for RoPE."""
@@ -614,7 +631,7 @@ class LLM(nn.Module):
         # Create AdamW optimizer and use the fused version if it is available
         try:
             optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, fused=True)
-            # print("Using Fused AdamW")
+            self.print_fused_adamw = True
         except:
             optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate)
         return optimizer
@@ -657,7 +674,11 @@ class LLM(nn.Module):
         total_aux_loss = 0.0
         for i, block in enumerate(self.transformer.h):
             # The block now returns an auxiliary loss from the MoE layer
-            x, updated_kv_cache, aux_loss = block(x, freqs_cis, kv_caches[i])
+            if not self.config.act_recomp: 
+                x, updated_kv_cache, aux_loss = block(x, freqs_cis, kv_caches[i], self.VAL_RUN)
+            else : 
+                x, updated_kv_cache, aux_loss = checkpoint(block, x, freqs_cis, kv_caches[i], self.VAL_RUN)
+
             updated_kv_caches.append(updated_kv_cache)
             total_aux_loss += aux_loss
 
@@ -724,3 +745,4 @@ class LLM(nn.Module):
 
         self.train()
         return idx
+ 
