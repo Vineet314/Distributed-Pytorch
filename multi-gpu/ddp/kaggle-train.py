@@ -1088,17 +1088,15 @@ for iter in range(TrainingConfig.max_iters+1):
         t0 = b
     
     for micro_step in range(grad_accum_steps):
-        # only sync gradients on the very last step.
-        sync_context = model.no_sync() if micro_step < (grad_accum_steps-1) else nullcontext()
-        x, y = train_loader.next_batch()
+        model.require_backward_grad_sync = (micro_step == grad_accum_steps - 1)
+        # sync_context = model.no_sync() if micro_step < (grad_accum_steps-1) else nullcontext()
+        # with sync_context:
+        with ctx:
+            _, loss, _ = model(x,y)
+            loss:torch.Tensor = loss/grad_accum_steps
 
-        with sync_context:
-            with ctx:
-                _, loss, _ = model(x, y)
-                loss = loss / grad_accum_steps
-            scaler.scale(loss).backward() # The backward pass must be inside the sync_context
-
-        x,y = train_loader.next_batch() # async pre-load the next batch while GPU does backward pass
+        x,y = train_loader.next_batch() # async pre-load next batch
+        scaler.scale(loss).backward()
 
     if TrainingConfig.grad_clip != 0.0:
         scaler.unscale_(optimizer)
