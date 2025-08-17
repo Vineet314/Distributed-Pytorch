@@ -570,8 +570,8 @@ class LLM(nn.Module):
         self.apply(self._init_weights)
 
         self.VAL_RUN=False
-        self.print_act_recomp='fused' in inspect.signature(torch.optim.AdamW).parameters
-        self.print_fused_adamw=False 
+        self.print_act_recomp=config.act_recomp
+        self.print_fused_adamw='fused' in inspect.signature(torch.optim.AdamW).parameters
 
     def _precompute_freqs_cis(self):
         """Precomputes the rotary frequencies for RoPE."""
@@ -762,6 +762,7 @@ from time import perf_counter
 
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
+from torch.distributed.optim import ZeroRedundancyOptimizer
 
 assert torch.cuda.is_available()
 assert torch.cuda.device_count() > 1
@@ -1058,7 +1059,7 @@ if master_process :
     if model.print_fused_adamw: print("Using Fused AdamW")
     if model.print_act_recomp: print("Using Activation Recomputation")
 
-model = DDP(model, device_ids=[ddp_local_rank], find_unused_parameters=ModelConfig.moe)
+model = DDP(model, device_ids=[ddp_local_rank], find_unused_parameters=ModelConfig.moe, gradient_as_bucket_view=True)
 
 if master_process : print("Using compiled model")
 model = torch.compile(model)
@@ -1067,13 +1068,21 @@ raw_model:LLM = model.module
 
 #______________________________________________ TRAINING ______________________________________________
 
-optimizer = raw_model.configure_optimizers(weight_decay=0.1,learning_rate=TrainingConfig.learning_rate,device=device)
+param_groups = raw_model.configure_optimizers(weight_decay=0.1,learning_rate=TrainingConfig.learning_rate,device=device).param_groups
+
+optimizer = ZeroRedundancyOptimizer(
+    params=param_groups,
+    optimizer_class=torch.optim.AdamW,
+    lr=TrainingConfig.learning_rate,
+    fused=raw_model.print_fused_adamw)
+
 x,y = train_loader.next_batch()
 
 for iter in range(TrainingConfig.max_iters+1):
     t0 = perf_counter()
 
     lr = get_lr(iter, TrainingConfig)
+    
     for param_grp in optimizer.param_groups:
         param_grp['lr'] = lr
     
