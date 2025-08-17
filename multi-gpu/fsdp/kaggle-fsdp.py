@@ -759,7 +759,6 @@ import requests
 import numpy as np
 
 from time import perf_counter
-from functools import partial
 
 from torch.distributed import init_process_group, destroy_process_group
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
@@ -774,16 +773,17 @@ assert torch.cuda.device_count() > 1
 # ______________DEVICE, DTYPE, DDP SETUP_________________
 
 init_process_group(backend='nccl')
-ddp_rank = int(os.environ['RANK'])
-ddp_local_rank = int(os.environ['LOCAL_RANK'])
-ddp_world_size = int(os.environ['WORLD_SIZE'])
-device = f"cuda:{ddp_local_rank}"
-master_process = ddp_rank == 0
-if master_process : print(f"DDP_WORLD_SIZE = {ddp_world_size}")
+
+rank = int(os.environ['RANK'])
+local_rank = int(os.environ['LOCAL_RANK'])
+world_size = int(os.environ['WORLD_SIZE'])
+device = f"cuda:{local_rank}"
+master_process = rank == 0
+if master_process : print(f"Num GPUs = {world_size}")
 
 torch.cuda.set_device(device)
-torch.manual_seed(1729 + ddp_rank)         # offset the seed
-torch.cuda.manual_seed(1729 + ddp_rank)    # offset the seed
+torch.manual_seed(1729 + rank)         # offset the seed
+torch.cuda.manual_seed(1729 + rank)    # offset the seed
 torch.set_float32_matmul_precision('high') # Not sure if this has any effect when used with Auto Mixed Precision
 torch.backends.cuda.matmul.allow_tf32 = True # allow tf32 on matmul
 torch.backends.cudnn.allow_tf32 = True # allow tf32 on cudnn
@@ -1052,8 +1052,8 @@ def estimate_loss(model:LLM, TrainingConfig:Trainconfig, train_loader:DataLoader
 total_batch_size = TrainingConfig.total_batch_size
 B = TrainingConfig.batch_size    # microbatch size
 T = ModelConfig.block_size       # sequence length
-assert total_batch_size % (B * T *ddp_world_size) == 0, "make sure total_batch_size is divisible by B * T * ddp_world_size"
-grad_accum_steps = total_batch_size // (B * T *ddp_world_size)
+assert total_batch_size % (B * T *world_size) == 0, "make sure total_batch_size is divisible by B * T * world_size"
+grad_accum_steps = total_batch_size // (B * T *world_size)
 
 #___________CREATE YOUR MODEL_____________
 
