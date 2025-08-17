@@ -31,6 +31,7 @@ Available settings to choose from :
 '''
 import warnings; warnings.filterwarnings('ignore')
 import math
+import inspect
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -540,7 +541,6 @@ class Block(nn.Module):
 
         return x, updated_kv_cache, aux_loss
 
-
 class LLM(nn.Module):
     """ A simple Large language model """
     def __init__(self, config:LLMconfig):
@@ -570,7 +570,7 @@ class LLM(nn.Module):
         self.apply(self._init_weights)
 
         self.VAL_RUN=False
-        self.print_act_recomp=config.act_recomp
+        self.print_act_recomp='fused' in inspect.signature(torch.optim.AdamW).parameters
         self.print_fused_adamw=False 
 
     def _precompute_freqs_cis(self):
@@ -641,7 +641,6 @@ class LLM(nn.Module):
         # Create AdamW optimizer and use the fused version if it is available
         try:
             optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, fused=True)
-            self.print_fused_adamw = True
         except:
             optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate)
         return optimizer
