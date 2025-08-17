@@ -1082,6 +1082,7 @@ model = FSDP(
     # cpu_offload=CPUOffload(offload_params=True), # Optional: to save even more GPU memory
     limit_all_gathers=True, # Recommended for performance
     use_orig_params=True, # Important for optimizers like AdamW and for getting original parameters
+    sync_module_states=True,
 )
 
 if master_process : print("Using compiled model")
