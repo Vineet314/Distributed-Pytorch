@@ -789,7 +789,7 @@ torch.backends.cuda.matmul.allow_tf32 = True # allow tf32 on matmul
 torch.backends.cudnn.allow_tf32 = True # allow tf32 on cudnn
 
 dtype = 'float16' # if not torch.cuda.is_bf16_supported else 'bfloat16'
-# ctx = torch.amp.autocast(device_type="cuda", dtype=getattr(torch, dtype)) # not required when using Pytorch FSDP
+ctx = torch.amp.autocast(device_type="cuda", dtype=getattr(torch, dtype)) # probably not required when using Pytorch FSDP
 scaler = torch.amp.GradScaler(enabled=(dtype == 'float16'))
 
 # ____________PARAMS-CONFIG_________________
@@ -1039,8 +1039,9 @@ def estimate_loss(model:LLM, TrainingConfig:Trainconfig, train_loader:DataLoader
     for split, loader in [('train', train_loader), ('val', val_loader)]:
         losses = torch.zeros(TrainingConfig.eval_iters)
         for k in range(TrainingConfig.eval_iters):
-            X, Y = loader.next_batch() 
-            _, loss, _ = model(X, Y)
+            X, Y = loader.next_batch() # Data is now moved to device in next_batch()
+            with ctx:
+                _, loss, _ = model(X, Y)
             losses[k] = loss.item()
         out[split] = losses.mean()
     model.train(); model.VAL_RUN = False
@@ -1114,15 +1115,19 @@ for iter in range(TrainingConfig.max_iters+1):
         model.require_backward_grad_sync = (micro_step == grad_accum_steps - 1)
         # sync_context = model.no_sync() if micro_step < (grad_accum_steps-1) else nullcontext()
         # with sync_context:
-        _, loss, _ = model(x,y)
-        loss:torch.Tensor = loss/grad_accum_steps
+        with ctx:
+            _, loss, _ = model(x,y)
+            loss:torch.Tensor = loss/grad_accum_steps
+
         x,y = train_loader.next_batch() # async pre-load next batch
-        loss.backward()
+        scaler.scale(loss).backward()
 
     if TrainingConfig.grad_clip != 0.0:
+        scaler.unscale_(optimizer)
         model.clip_grad_norm_(TrainingConfig.grad_clip)
 
-    optimizer.step()
+    scaler.step(optimizer)
+    scaler.update()    
 
     if master_process:
         torch.cuda.synchronize()
