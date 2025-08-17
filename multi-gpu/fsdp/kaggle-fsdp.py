@@ -788,8 +788,9 @@ torch.set_float32_matmul_precision('high') # Not sure if this has any effect whe
 torch.backends.cuda.matmul.allow_tf32 = True # allow tf32 on matmul
 torch.backends.cudnn.allow_tf32 = True # allow tf32 on cudnn
 
-dtype = 'float16' # if not torch.cuda.is_bf16_supported else 'bfloat16'
-ctx = torch.amp.autocast(device_type="cuda", dtype=getattr(torch, dtype)) # probably not required when using Pytorch FSDP
+dtype = 'float16' # if not torch.cuda.is_bf16_supported() else 'bfloat16'
+torch_dtype = getattr(torch, dtype)
+ctx = torch.amp.autocast(device_type="cuda", dtype=torch_dtype)
 scaler = torch.amp.GradScaler(enabled=(dtype == 'float16'))
 
 # ____________PARAMS-CONFIG_________________
@@ -1059,7 +1060,6 @@ grad_accum_steps = total_batch_size // (B * T *world_size)
 
 fsdp_wrap_policy = ModuleWrapPolicy({Block})
 
-torch_dtype = getattr(torch, dtype)
 mp_policy = MixedPrecision(
     param_dtype=torch_dtype,
     reduce_dtype=torch_dtype,
